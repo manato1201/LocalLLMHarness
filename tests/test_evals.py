@@ -28,10 +28,13 @@ def sc(spec, reply="", message=None, allow_exec=False):
 
 # ── 問題の読み込み ────────────────────────────────────────
 def test_starter_cases_load_and_have_unique_ids():
-    cases = evals.load_cases(ROOT / "evals" / "cases")
+    cases = evals.load_cases(ROOT / "evals" / "cases" / "starter.jsonl")
     assert len(cases) == 24
-    assert len({c.id for c in cases}) == 24
     assert {c.category for c in cases} >= {"資料への質問", "コード生成", "要約・分類", "ツール呼び出し", "構造の把握", "機密度の判定"}
+    hard = evals.load_cases(ROOT / "evals" / "cases" / "hard.jsonl")
+    assert len(hard) == 14
+    everything = evals.load_cases(ROOT / "evals" / "cases")
+    assert len(everything) == 38 and len({c.id for c in everything}) == 38, "id は、ファイルをまたいでも一意"
 
 
 def test_starter_policy_cases_all_pass_with_the_example_policy(harness):
@@ -358,3 +361,98 @@ def test_eval_cli_skipped_python_message(eval_cfg, tmp_path, capsys):
     cases = write_cases(tmp_path, [{"id": "p1", "category": "コード", "prompt": "q", "score": {"type": "python", "tests": "assert True"}}])
     main(["--config", eval_cfg, "eval", "--cases", cases, "--repeat", "1", "--out", str(tmp_path / "o")])
     assert "採点しなかった問題" in capsys.readouterr().out
+
+
+# ── 検証つき生成(A1)の評価への組み込み ──────────────────────
+def mkj(cid="j1", **kw):
+    """検証役を作れる問題(JSON の形)。"""
+    return mk(cid, score=[{"type": "json", "required": ["ok"], "types": {"ok": "integer"}}], **kw)
+
+
+def test_verify_retries_turns_a_failure_into_a_pass(harness, backend):
+    backend.replies = ["x", "x", '{"ok": 1}']
+    plain = evals.run_eval(harness, [mkj()], repeat=1)[0]
+    assert plain.passed is False and plain.tries == 1 and plain.escalated is False
+    backend.replies = ["x", "x", '{"ok": 1}']
+    a = evals.run_eval(harness, [mkj()], repeat=1, verify_retries=2)[0]
+    assert a.passed is True and a.tries == 3 and a.escalated is False
+    assert a.prompt_tokens == 30 and a.seconds
+
+
+def test_verify_retries_exhausted_is_escalated(harness, backend):
+    backend.reply = "x"
+    a = evals.run_eval(harness, [mkj()], repeat=1, verify_retries=1)[0]
+    assert a.passed is False and a.tries == 2 and a.escalated and "JSON" in a.detail
+
+
+def test_verify_summary(harness, backend):
+    backend.replies = ['{"ok": 1}', "x", "x", "x"]   # x は 1 回で通る。y は 3 回とも通らない
+    attempts = evals.run_eval(harness, [mkj("x"), mkj("y")], repeat=1, verify_retries=2)
+    vs = evals.verify_summary(attempts)
+    assert vs["attempts"] == 2 and vs["mean_tries"] == pytest.approx((1 + 3) / 2)
+    assert vs["first_try_pass"] == 0.5 and vs["escalation_rate"] == 0.5
+
+
+def test_verify_retries_skips_python_without_allow_exec(harness):
+    case = mk("p", score=[{"type": "python", "tests": "assert True"}])
+    a = evals.run_eval(harness, [case], repeat=3, verify_retries=2)[0]
+    assert a.passed is None and a.skipped
+
+
+def test_verify_retries_does_not_write_escalation_records(cfg, harness, backend):
+    backend.reply = "x"
+    evals.run_eval(harness, [mkj()], repeat=1, verify_retries=1)
+    assert not cfg.escalation_path.exists(), "評価の実行は、本番のエスカレーション記録を汚さない"
+
+
+# ── 検証つき生成の評価は、正解を教えない ──────────────────────
+def test_validity_specs_never_contain_the_answer():
+    cases = evals.load_cases(ROOT / "evals" / "cases")
+    for c in cases:
+        for spec in evals.validity_specs(c):
+            if spec["type"] == "python":
+                continue   # テストは、本番でも検証役として使える
+            leaked = {"expected", "all", "any", "pattern", "equals", "args", "cited", "name"} & set(spec)
+            assert not leaked, (c.id, spec["type"], leaked)
+
+
+def test_label_wrong_answer_is_not_corrected_by_the_verifier(harness, backend):
+    """ラベルの正誤は、正解を知らないと確かめられない。候補内のラベルが出ていれば、再試行しない(正解を教えない)。"""
+    case = mk("cls", score=[{"type": "label", "labels": ["error", "warning", "info"], "expected": "warning"}])
+    backend.reply = "info"
+    a = evals.run_eval(harness, [case], repeat=1, verify_retries=2)[0]
+    assert a.passed is False and a.tries == 1 and a.escalated is False, "検証は通っている(正誤は検証できない)"
+    assert len(backend.requests) == 1
+
+
+def test_label_not_in_candidates_is_retried_without_revealing_the_answer(harness, backend):
+    case = mk("cls", score=[{"type": "label", "labels": ["error", "warning", "info"], "expected": "warning"}])
+    backend.replies = ["分かりません", "info"]
+    a = evals.run_eval(harness, [case], repeat=1, verify_retries=2)[0]
+    assert a.tries == 2 and a.passed is False
+    feedback = backend.requests[1]["messages"][-1]["content"]
+    assert "ラベルが見つからない" in feedback and "期待" not in feedback
+
+
+def test_answer_only_cases_fall_back_to_a_single_generation(harness, backend):
+    backend.reply = "b"
+    a = evals.run_eval(harness, [mk()], repeat=1, verify_retries=3)[0]   # contains だけ = 検証役を作れない
+    assert a.passed is False and a.tries == 1 and len(backend.requests) == 1
+
+
+def test_json_values_are_not_revealed_but_types_are_checked(harness, backend):
+    case = mk("j", score=[{"type": "json", "required": ["total"], "types": {"total": "integer"}, "equals": {"total": 12800}}])
+    backend.replies = ['{"total": "12800"}', '{"total": 999}']
+    a = evals.run_eval(harness, [case], repeat=1, verify_retries=2)[0]
+    assert a.tries == 2 and a.passed is False, "型は直せるが、値(正解)は教えない"
+    feedback = backend.requests[1]["messages"][-1]["content"]
+    assert "integer" in feedback and "12800" not in feedback
+
+
+def test_tool_call_validity_checks_shape_only(harness, backend):
+    tools = [{"type": "function", "function": {"name": "get_weather", "parameters": {"type": "object"}}}]
+    case = mk("t", tools=tools, score=[{"type": "tool_call", "name": "get_weather", "args": {"city": "東京"}}])
+    backend.reply = "ツールを呼ばずに答えます"
+    a = evals.run_eval(harness, [case], repeat=1, verify_retries=1)[0]
+    assert a.tries == 2 and "ツール呼び出しが無い" in backend.requests[1]["messages"][-1]["content"]
+    assert "東京" not in backend.requests[1]["messages"][-1]["content"]

@@ -49,6 +49,8 @@ def cfg(tmp_path, backend):
         queue_timeout_s=3,
         policy_path=ROOT / "policy.example.toml",
         audit_path=tmp_path / "audit.jsonl",
+        escalation_path=tmp_path / "escalations.jsonl",
+        verified_path=tmp_path / "verified.jsonl",
     )
 
 

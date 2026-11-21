@@ -17,6 +17,8 @@ class FakeBackend:
         self.auth_headers: list[str | None] = []
         self.replies: list[str] = []  # 先頭から順に返す(空なら reply)
         self.load_calls: list[dict] = []
+        self.embed_calls: list[dict] = []
+        self.embed_status = 200
         self.load_status = 200        # /load が返す HTTP ステータス
         self.load_effective = True    # False なら、200 を返しても、実際には読み込まない
         self.require_key: str | None = None  # 設定すると、このキーの Bearer が無い要求を 401 で断る(Unsloth の挙動)
@@ -49,6 +51,14 @@ class FakeBackend:
                 if self._denied():
                     return
                 body = json.loads(self.rfile.read(int(self.headers["Content-Length"])))
+                if self.path.endswith("/embeddings"):
+                    outer.embed_calls.append(body)
+                    if outer.embed_status != 200:
+                        self._send(outer.embed_status, {"error": {"message": "no embedding model"}})
+                        return
+                    inputs = body["input"]
+                    self._send(200, {"data": [{"index": i, "embedding": [float(i), 0.5, -0.25]} for i in reversed(range(len(inputs)))]})
+                    return
                 if self.path.endswith("/load"):
                     outer.load_calls.append(body)
                     if outer.load_status != 200:

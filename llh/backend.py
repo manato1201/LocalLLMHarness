@@ -120,6 +120,21 @@ class Backend:
             conn.close()
             self._models_cache = None
 
+    def embed(self, model: str, texts: list[str]) -> list[list[float]]:
+        """`POST /v1/embeddings`。入力と同じ順のベクトルを返す(裏側に埋め込みモデルがあるときだけ)。"""
+        conn, resp = self._request("POST", "/embeddings", {"model": model, "input": texts})
+        try:
+            raw = resp.read()
+            if resp.status != 200:
+                raise BackendError(resp.status if 400 <= resp.status < 600 else 502, self._error_message(resp.status, raw))
+            try:
+                rows = sorted(json.loads(raw)["data"], key=lambda r: r.get("index", 0))
+                return [[float(x) for x in r["embedding"]] for r in rows]
+            except (ValueError, KeyError, TypeError) as e:
+                raise BackendError(502, "推論の裏側の /embeddings の応答の形が想定と違います") from e
+        finally:
+            conn.close()
+
     def chat(self, body: dict) -> dict:
         conn, resp = self._request("POST", "/chat/completions", body)
         try:

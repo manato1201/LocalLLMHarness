@@ -20,6 +20,10 @@
 | 行き先の表示 | `POST /v1/route`・`llh route`:送らずに、モデル・機密度・行き先だけを返す | Z4 |
 | git diff の要約 | `llh diff-summary`:差分の要約とコミットメッセージ案。**コミット・push はしない**(読み取り専用の git だけ) | §4 |
 | Mermaid の生成 | `llh mermaid`:生成 → 構文検査(`mmdc` があれば本物のパーサーも)→ 落ちたら問題を渡して作り直し(最大 3 回)。**通ったものだけ**出力・保存 | §4・A1 |
+| 文書の要約 | `llh summarize`:文脈が 8K トークンなので、**全文を渡さず**、見出し・段落で分割 → 断片ごとの要点 → 段階的にまとめる(map-reduce)。文書の中の命令には従わない | §4・A3 |
+| 検証つき生成・エスカレーション | `verified_generate`:生成 → 機械で検証 → 失敗の内容を渡して作り直し(最大 N 回)。通らなければ `escalate`(内容を残さず、ハッシュと検証の詳細だけを `logs/escalations.jsonl` に記録) | A1・A6 |
+| Claude Code 用の MCP | `llh mcp`(local-llm-mcp):`local_summarize` / `local_classify` / `local_extract` / `local_ask_docs` / `local_embed`。**結果は Claude に渡るので、外に出さない区分の入力は断る**。[docs/MCP.md](docs/MCP.md) | Phase 5・I9 |
+| 微調整の準備 | `llh export-sft`:検証に通った生成を、学習データにまとめる(外に出さない区分・評価セットと同じ質問は除く)。**学習はしない**。[docs/PHASE6.md](docs/PHASE6.md) | Phase 6 |
 
 ## クイックスタート
 
@@ -61,6 +65,10 @@ uv run llh mermaid "ユーザー→窓口→Unsloth の流れ" --out docs\flow.m
 uv run llh audit-verify                               # 監査ログの連鎖を確かめる
 uv run llh bench --role main --sizes 512,2048,4096,6000   # 入力の長さごとの速度(TTFT・入力処理・生成)
 uv run llh eval                                       # 評価セット(evals/cases)を 3 回ずつ解いて、区分ごとの合格率(evals/README.md)
+uv run llh eval --verify-retries 2                    # 検証つき生成(A1)の効果を測る(検証役は正解を知らない検証だけ)
+uv run llh summarize C:\docs\long.md              # 長い文書を、分割して要約する
+uv run llh mcp                                        # Claude Code 用の MCP サーバー(登録は docs/MCP.md)
+uv run llh export-sft                                 # 検証に通った生成を、学習データにまとめる(Phase 6 の準備)
 ```
 
 呼び出し側(Python などの OpenAI クライアント)は、`base_url="http://127.0.0.1:8800/v1"`、`model="llh-main"`(または `auto`)にします。追加の指定は、リクエストの本体の `llh` で:
@@ -85,13 +93,25 @@ uv run llh eval                                       # 評価セット(evals/ca
 | 窓口・機密度の判定・振り分け・監査ログ・CLI(この repo) | **実装済み**。テストは偽の Unsloth で通し(`uv run pytest -q`)、`llh load` / `smoke` / `serve` と窓口経由の質問は**本物の Unsloth で確認済み** |
 | Step 4 `rag_local_bridge.py` を窓口へ | **適用済み**(`RAG_LLM_BACKEND=local`。偽の窓口でテスト 11 件。本物の窓口を通した `/query` は未確認。[INTEGRATION.md](docs/INTEGRATION.md) §1) |
 | Step 5 `VLMAutoReplayTool` を窓口へ | **確認済み**(環境変数だけ。画面の説明が窓口 → Qwen3.5 で通る。§2) |
-| Step 6 `ToolOrchestrationHub` への登録 | **登録済み**(台帳 13 件目・リポジトリ 14 件目。死活監視を確認。Hub の画面と Start/Stop は未確認。§3) |
+| Step 6 `ToolOrchestrationHub` への登録 | **登録済み**(台帳 13 件目・リポジトリ 14 件目)。Hub の画面で、一覧・オフィス・アラート・リポジトリに出ることを確認。**Start/Stop は未確認**(§3) |
+
+### 設計書の Phase
+
+| Phase | 状態 |
+|---|---|
+| 0 導入・実測 | 速度・入力の長さごとの速度(入力 5548 トークンで TTFT 2.25 秒)・入れ替え(約 9 秒)は測定済み。**16K・32K、B1/B2 の比較は未了** |
+| 1 評価セット | 枠組み(`llh eval`)・スターター 24 問・難問 14 問。**実際の仕事の問題と、Claude の基準は、これから** |
+| 2 窓口と機密度 | **完了** |
+| 3 縦の線(資料への質問) | RAG ブリッジの `local` は作成済み。**本物での通しと、評価は未了** |
+| 4 性能を上げる工夫 | A1 検証つき生成・A3 文脈の節約(`llh summarize`)・A6 エスカレーションの記録を実装。**A1 を実機で測定**([docs/PHASE4.md](docs/PHASE4.md))。A2・A4・A5・A7〜A13 は、効果の大きい順に、これから |
+| 5 連携・道具 | `llh mcp`(local-llm-mcp)・CLI(`eval` / `route` / `bench` / `policy-check` / `summarize` / `export-sft`)を実装。**Claude Code からの実接続は未確認** |
+| 6 微調整(任意) | **準備だけ**(`export-sft`・開始の条件)。学習は、評価で「負けている区分」が分かってから |
 
 ### まだ無いもの(正直に)
 
-- **クラウドへの経路**: 窓口はローカルの裏側にしか送りません(「ローカルのみ」モード=常時 ON)。機密度の判定は**記録と表示**に使われ、振り分けのエスカレーション(Claude への回し)は未実装です。経路を足すときは、必ず `Policy.check_egress` を通します。
-- **Phase 0 の実測**: 一部だけ。生成速度(main 53 / writer 107 tok/s)とモデルの入れ替え(約 9 秒)は測りました。文脈 8K/16K/32K での変化・B1/B2 の比較・ツール呼び出しの正答率は未着手です。**評価セット `evals/`** は、枠組みとスターター 24 問まで(実際の仕事の問題 40 問前後と、Claude の基準は、これから)。
-- **VRAM は余裕がありません**: main の読み込み中で空き約 0.8GB(他のプロセスの分を含む)。画像付きの質問(約 2000 トークン、約 34 秒)は重いので、画像は縮小してください。
+- **クラウドへの経路**: 窓口はローカルの裏側にしか送りません(「ローカルのみ」モード=常時 ON)。機密度の判定は**記録と表示**に使われ、振り分けのエスカレーション(Claude への回し)は、**記録まで**(`logs/escalations.jsonl`)で、実際に Claude へ回す経路は未実装です。経路を足すときは、必ず `Policy.check_egress` を通します。
+- **評価は、小さい試験です**: スターター 24 問は、Qwen3.5-9B が全問合格で、差が出ません。難問 14 問で A1 を測りましたが、温度 0 で 3 回解くので、実質の標本は 14 問です。**区分ごとに「ローカルに回せる」と決めるには、実際の仕事の問題(40 問前後)と、Claude の基準が要ります。**
+- **VRAM は余裕がありません**: main の読み込み中で空き約 0.8GB(他のプロセスの分を含む)。画像付きの質問は重い(4K の画面全体で約 2000 トークン・約 34 秒)ので、VLMAutoReplayTool 側で縮小します(既定 1280px。縮小後の速度と、小さい文字が読めるかは未測定)。
 - **利用者ごとのトークン・管理者/デバッグの画面分け**(設計書「機能の範囲」): 未実装。今は単一の任意トークンだけ。
 - **優先度つきの順番待ち**: 直列化(先着順)だけ。
 - **トークン数の見積もり**は「3 文字 ≒ 1 トークン」の目安で、厳密ではありません。

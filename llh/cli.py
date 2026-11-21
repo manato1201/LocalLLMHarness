@@ -243,7 +243,7 @@ def cmd_eval(args) -> int:
 
     try:
         attempts = evals.run_eval(h, cases, repeat=args.repeat, temperature=args.temperature, allow_exec=args.allow_exec,
-                                  default_role=args.role, on_attempt=tick)
+                                  default_role=args.role, on_attempt=tick, verify_retries=args.verify_retries)
     except HarnessError as e:
         print()
         _out(f"NG ({e.status} {e.code}): {e.message}")
@@ -263,6 +263,11 @@ def cmd_eval(args) -> int:
     skipped = {a.case_id: a.skipped for a in attempts if a.skipped}
     if skipped:
         _out(f"採点しなかった問題: {len(skipped)} 件({next(iter(skipped.values()))})")
+    if args.verify_retries:
+        vs = evals.verify_summary(attempts)
+        if vs:
+            _out(f"検証つき生成(再試行 {args.verify_retries} 回まで): 平均 {vs['mean_tries']:.2f} 回の生成、"
+                 f"1 回目で通った {vs['first_try_pass']:.0%}、エスカレーション(通らず) {vs['escalation_rate']:.0%}")
     sp = evals.speed_summary(attempts)
     if sp:
         _out(f"速度: 1 問の中央値 {sp['median_s']:.1f} 秒、{sp['mean_tok_s']:.0f} tok/s(待ち時間込み)")
@@ -278,9 +283,70 @@ def cmd_eval(args) -> int:
     evals.write_results(path, h, attempts, {
         "ts": _time.strftime("%Y-%m-%dT%H:%M:%S%z"), "repeat": args.repeat, "temperature": args.temperature,
         "cases_sha256": evals.cases_fingerprint(cases), "cases": len(cases), "default_role": args.role,
+        "verify_retries": args.verify_retries,
     })
     _out(f"\n結果: {path}(出力の抜粋を含むので、ローカルのみ。git には入れない)")
     return 0 if not errors else 1
+
+
+def cmd_summarize(args) -> int:
+    """長い文書を、分割して要約する(設計書 A3)。全文を一度に渡さない。"""
+    from .summarize import SummarizeError, summarize_file, summarize_text
+
+    h = _harness(args)
+    progress = None if args.quiet else (lambda m: print(f"  … {m}", file=sys.stderr, flush=True))
+    try:
+        if args.path == "-":
+            r = summarize_text(h, sys.stdin.read(), sentences=args.sentences, role=args.role,
+                               max_chunks=args.max_chunks, progress=progress)
+        else:
+            r = summarize_file(h, args.path, sentences=args.sentences, role=args.role,
+                               max_chunks=args.max_chunks, progress=progress)
+    except SummarizeError as e:
+        _out(f"要約できません: {e}")
+        return 1
+    except HarnessError as e:
+        _out(f"NG ({e.status} {e.code}): {e.message}")
+        return 2
+    _out(r.summary)
+    _out("\n---")
+    _out(f"モデル: {r.model} / 断片 {r.chunks} 個・呼び出し {r.calls} 回・{r.levels} 段 / {r.seconds:.1f} 秒 / "
+         f"入力 {r.prompt_tokens}・出力 {r.completion_tokens} トークン / 機密度: {r.sensitivity or '-'}(処理はこのPCの中だけ)")
+    for n in r.notes:
+        _out(f"注: {n}")
+    return 0
+
+
+def cmd_mcp(args) -> int:
+    """Claude Code 用の MCP サーバー(標準入出力)。登録: claude mcp add local-llm -- uv --directory <このフォルダ> run llh mcp"""
+    from .mcp_server import run_stdio
+
+    run_stdio(_harness(args))
+    return 0
+
+
+def cmd_export_sft(args) -> int:
+    """検証に通った生成を、学習データ(chat 形式の JSONL)にまとめる(Phase 6 の準備。学習はしない)。"""
+    from . import sft
+    from .config import ROOT
+
+    cfg = load_config(args.config)
+    policy = load_policy(cfg.policy_path)
+    sources = [cfg.verified_path, *args.extra] if not args.no_verified else list(args.extra)
+    if not sources:
+        _out("入力がありません。")
+        return 1
+    out = Path(args.out) if args.out else ROOT / "logs" / "sft.jsonl"
+    rep = sft.export_sft(policy, out, sources, None if args.no_eval_guard else ROOT / "evals" / "cases")
+    _out(f"読んだ {rep.read} 件 → 書き出し {rep.written} 件({out})")
+    _out(f"  除外: 外に出さない区分 {rep.skipped_sensitive}・評価セットと同じ質問 {rep.skipped_eval_leak}・重複 {rep.skipped_duplicate}・形式が対象外 {rep.skipped_invalid}")
+    if rep.by_label:
+        _out("  区分: " + "、".join(f"{k} {v}" for k, v in sorted(rep.by_label.items())))
+    if not cfg.save_verified and not args.extra:
+        _out("注: config.toml の [training] save_verified = true にすると、検証に通った生成が logs/verified.jsonl に溜まります(既定は保存しない)。")
+    _out(f"微調整を始める目安: {sft.MIN_EXAMPLES_TO_TRAIN} 件以上({'満たしています' if rep.ready else '足りません'})。"
+         "その前に、評価で『効かせたい区分が負けている』ことを確かめてください(docs/PHASE6.md)。")
+    return 0
 
 
 def cmd_route(args) -> int:
@@ -420,9 +486,27 @@ def build_parser() -> argparse.ArgumentParser:
     s.add_argument("--temperature", type=float, default=0.0, help="温度(既定 0。固定する)")
     s.add_argument("--limit", type=int, help="先頭の N 問だけ(試し用)")
     s.add_argument("--baseline", help="基準(Claude など)の問題ごとの合格率。{id: 0〜1} の JSON か、この `eval` の結果(.jsonl)")
+    s.add_argument("--verify-retries", type=int, default=0, help="検証つき生成(A1): 採点に通らなければ、失敗の内容を渡して作り直す回数(既定 0=しない)")
     s.add_argument("--allow-exec", action="store_true", help="生成されたコードを実行して採点する(サンドボックスではない。自分で確認した問題だけに)")
     s.add_argument("--out", help="結果の保存先フォルダ(既定: evals/results)")
     s.set_defaults(func=cmd_eval)
+
+    s = sub.add_parser("summarize", help="長い文書を、分割して要約する(全文を一度に渡さない)")
+    s.add_argument("path", help="文書(テキスト・Markdown)。'-' で標準入力")
+    s.add_argument("--sentences", type=int, default=5, help="要約の文の数の目安(既定 5)")
+    s.add_argument("--role", default="writer", help="使うロール(既定 writer)")
+    s.add_argument("--max-chunks", type=int, default=40, help="分ける断片の数の上限(超えたら、先頭だけ)")
+    s.add_argument("--quiet", action="store_true", help="進み具合を出さない")
+    s.set_defaults(func=cmd_summarize)
+
+    sub.add_parser("mcp", help="local-llm-mcp(Claude Code 用の MCP サーバー。標準入出力)を起動する").set_defaults(func=cmd_mcp)
+
+    s = sub.add_parser("export-sft", help="検証に通った生成を、学習データ(chat 形式の JSONL)にまとめる(Phase 6 の準備)")
+    s.add_argument("--out", help="書き出し先(既定: logs/sft.jsonl)")
+    s.add_argument("--extra", action="append", default=[], help="追加のデータ(chat 形式の JSONL。Claude が解いた答えなど。利用規約を確認のうえ)")
+    s.add_argument("--no-verified", action="store_true", help="logs/verified.jsonl を使わない(--extra だけ)")
+    s.add_argument("--no-eval-guard", action="store_true", help="評価セットとの重複の除外をしない(非推奨)")
+    s.set_defaults(func=cmd_export_sft)
 
     s = sub.add_parser("route", help="送らずに、行き先・モデル・機密度だけを表示する")
     s.add_argument("text", help="質問の文('-' で標準入力)")

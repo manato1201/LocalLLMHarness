@@ -69,3 +69,8 @@ local_only = true
 [mermaid]
 # DocsPipeline の標準の行(`docspipeline check-mermaid --fix` が入れるもの)。空なら入れない。
 require_init_line = false
+
+[training]
+# Phase 6(微調整の準備。docs/PHASE6.md)。true にすると、検証に通った生成(A1)を logs/verified.jsonl に保存する。
+# **質問と回答の全文を含む**ので、ローカルのみ。「外に出さない」区分は保存しない。既定は保存しない。
+save_verified = false

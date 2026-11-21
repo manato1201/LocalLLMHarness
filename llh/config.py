@@ -70,6 +70,9 @@ class Config:
     queue_timeout_s: float = 120.0
     policy_path: Path = ROOT / "policy.toml"
     audit_path: Path = ROOT / "logs" / "audit.jsonl"
+    escalation_path: Path = ROOT / "logs" / "escalations.jsonl"   # 検証に通らなかった依頼の記録(中身は残さない)
+    save_verified: bool = False                                    # 検証に通った生成を、学習用に保存する(Phase 6。中身を含む。既定は保存しない)
+    verified_path: Path = ROOT / "logs" / "verified.jsonl"
     local_only: bool = True
     mermaid_require_init_line: bool = False
 
@@ -175,6 +178,9 @@ def load_config(path: str | Path | None = None) -> Config:
         queue_timeout_s=float(limits.get("queue_timeout_s", 120)),
         policy_path=policy_path,
         audit_path=_resolve(base, paths.get("audit_log", "logs/audit.jsonl")),
+        escalation_path=_resolve(base, paths.get("escalation_log", "logs/escalations.jsonl")),
+        save_verified=bool(raw.get("training", {}).get("save_verified", False)),
+        verified_path=_resolve(base, raw.get("training", {}).get("verified_log", "logs/verified.jsonl")),
         local_only=bool(mode.get("local_only", True)),
         mermaid_require_init_line=bool(mermaid.get("require_init_line", False)),
     )

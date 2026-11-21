@@ -233,6 +233,21 @@ def _score_one(spec: dict, reply: str, message: dict, ctx: "ScoreContext") -> tu
             return False, "arguments が JSON でない"
         wrong = {k: args.get(k) for k, v in spec.get("args", {}).items() if args.get(k) != v}
         return not wrong, f"引数が違う: {wrong}" if wrong else ""
+    if t == "label_valid":   # 検証用: 候補のどれかが出ているか(正解かどうかは見ない)
+        found = [lab for lab in spec["labels"] if str(lab).casefold() in low]
+        return bool(found), "" if found else f"ラベルが見つからない: {spec['labels']}"
+    if t == "tool_call_valid":   # 検証用: ツール呼び出しの形だけ(どの関数を・どの引数で呼ぶかは見ない)
+        calls = message.get("tool_calls") or []
+        if not calls:
+            return False, "ツール呼び出しが無い"
+        fn = calls[0].get("function", {})
+        if spec.get("names") and fn.get("name") not in spec["names"]:
+            return False, f"存在しない関数: {fn.get('name')}(使えるのは {spec['names']})"
+        try:
+            json.loads(fn.get("arguments") or "{}")
+        except ValueError:
+            return False, "arguments が JSON でない"
+        return True, ""
     if t == "python":
         if not ctx.allow_exec:
             raise _Skip("コードの実行は --allow-exec のときだけ")
@@ -269,13 +284,45 @@ class ScoreContext:
 
 
 def score_case(case: Case, message: dict, ctx: ScoreContext) -> tuple[bool, str]:
+    return _score_specs(case.score, message, ctx)
+
+
+def _score_specs(specs: list[dict], message: dict, ctx: ScoreContext) -> tuple[bool, str]:
     reply = message.get("content") or ""
     details = []
-    for spec in case.score:
+    for spec in specs:
         ok, detail = _score_one(spec, reply, message, ctx)
         if not ok:
             details.append(detail)
     return not details, "; ".join(details)
+
+
+def validity_specs(case: Case) -> list[dict]:
+    """**正解を知らなくても確かめられる**検証だけを取り出す(検証つき生成 A1 の検証役)。
+
+    本番の A1 の検証役は、テスト・構文検査・スキーマ・形式の検査で、「正解のラベル」や「正解の語」は持たない。
+    評価で A1 の効果を測るときに、正解に依存する採点(exact / contains / any / regex / label の正誤 / JSON の値 /
+    ツールの関数名・引数 / 引用すべき資料の番号 / 図に含める語)を検証に使うと、正解を教えてしまい、効果が過大になる。
+    """
+    out: list[dict] = []
+    for s in case.score:
+        t = s["type"]
+        if t == "python":
+            out.append(s)                                   # テストは、検証役として使える(本番でも、書いてあるテスト)
+        elif t == "mermaid":
+            out.append({"type": "mermaid"})                  # 構文だけ
+        elif t == "json":
+            v = {k: s[k] for k in ("required", "types") if k in s}
+            out.append({"type": "json", **v})                # 取り出せるか・キー・型だけ(値の正誤は見ない)
+        elif t == "tool_call":
+            names = [f["function"]["name"] for f in (case.tools or []) if isinstance(f, dict) and "function" in f]
+            out.append({"type": "tool_call_valid", "names": names})
+        elif t == "label":
+            out.append({"type": "label_valid", "labels": s["labels"]})
+        elif t == "citation":
+            out.append({"type": "citation", "sources": s.get("sources")} if s.get("sources") else {"type": "citation"})
+        # exact / contains / any / regex / policy: 正解がないと確かめられない → 検証役にしない
+    return out
 
 
 # ── 実行 ────────────────────────────────────────────────
@@ -293,6 +340,8 @@ class Attempt:
     reply: str = ""
     error: str = ""
     skipped: str = ""
+    tries: int = 1               # 検証つき生成(A1)で、生成した回数
+    escalated: bool = False      # 検証つき生成で、規定の回数でも通らなかった(Claude か人に回す。A6)
 
 
 def _policy_attempt(h: Harness, case: Case) -> Attempt:
@@ -305,7 +354,8 @@ def _policy_attempt(h: Harness, case: Case) -> Attempt:
     return Attempt(case.id, case.category, 1, ok, "" if ok else f"判定: {v.destination}(期待: {want}、理由: {list(v.reasons)})")
 
 
-def _llm_attempt(h: Harness, case: Case, n: int, temperature: float, ctx: ScoreContext, role: str) -> Attempt:
+def _llm_attempt(h: Harness, case: Case, n: int, temperature: float, ctx: ScoreContext, role: str,
+                 verify_retries: int = 0) -> Attempt:
     spec = h.cfg.model_for_role(role)
     body: dict = {
         "model": spec.alias, "messages": case.messages, "max_tokens": case.max_tokens,
@@ -317,6 +367,8 @@ def _llm_attempt(h: Harness, case: Case, n: int, temperature: float, ctx: ScoreC
         body["tool_choice"] = case.tool_choice
     if case.task:
         body["llh"] = {"task": case.task}
+    if verify_retries > 0:
+        return _verified_attempt(h, case, n, body, ctx, role, verify_retries)
     t0 = time.monotonic()
     try:
         res = h.chat(body)
@@ -342,8 +394,39 @@ def _llm_attempt(h: Harness, case: Case, n: int, temperature: float, ctx: ScoreC
                    role=role, reply=reply[:REPLY_KEEP_CHARS])
 
 
+def _verified_attempt(h: Harness, case: Case, n: int, body: dict, ctx: ScoreContext, role: str, retries: int) -> Attempt:
+    """検証つき生成(A1): 採点の仕組みを検証役にして、通らなければ失敗の内容を渡して作り直す(最大 retries 回の再試行)。
+
+    注意: 検証役が採点と同じなので、**検証が採点と同じ強さで使える仕事での上限**を測ることになる
+    (実際の仕事で、テスト・スキーマ・構文検査が使える場合に相当する)。
+    """
+    from .verify import verified_generate
+
+    vspecs = validity_specs(case)
+    if not vspecs:   # 正解がないと確かめられない問題(exact など): 検証つき生成は使えないので、1 回だけ
+        return _llm_attempt(h, case, n, body.get("temperature", 0.0), ctx, role, verify_retries=0)
+    try:
+        # 再試行の合図と説明は、正解に依存しない検証だけ(正解を教えない)。最終の合否は、下で完全な採点で決める
+        gen = verified_generate(h, body, lambda m: _score_specs(vspecs, m, ctx), max_attempts=retries + 1,
+                                label=case.id, record=False)
+    except _Skip as s:
+        return Attempt(case.id, case.category, n, None, "", None, role=role, skipped=str(s))
+    if gen.error and gen.attempts == 1 and not gen.message:
+        return Attempt(case.id, case.category, n, False, "", None, role=role, error=gen.error, tries=gen.attempts, escalated=True)
+    reply = gen.reply
+    if not reply and gen.message.get("tool_calls"):
+        reply = json.dumps(gen.message["tool_calls"], ensure_ascii=False)
+    ok, detail = score_case(case, gen.message, ctx)   # 最終の合否は、完全な採点(正解つき)で決める
+    if not reply and not ok:
+        detail = (detail + "; " if detail else "") + "本文が空(thinking が出力を使い切った可能性)"
+    return Attempt(case.id, case.category, n, ok, detail, gen.seconds, gen.prompt_tokens or None,
+                   gen.completion_tokens or None, role=role, reply=reply[:REPLY_KEEP_CHARS],
+                   tries=gen.attempts, escalated=gen.escalate)
+
+
 def run_eval(h: Harness, cases: list[Case], repeat: int = 3, temperature: float = 0.0, allow_exec: bool = False,
-             default_role: str = "main", on_attempt: Callable[[Attempt], None] | None = None) -> list[Attempt]:
+             default_role: str = "main", on_attempt: Callable[[Attempt], None] | None = None,
+             verify_retries: int = 0) -> list[Attempt]:
     """ロールごとにまとめて解く(モデルの入れ替えを最小にする。設計書 A11)。"""
     ctx = ScoreContext(allow_exec=allow_exec)
     out: list[Attempt] = []
@@ -361,7 +444,7 @@ def run_eval(h: Harness, cases: list[Case], repeat: int = 3, temperature: float 
             h.ensure_model_loaded(h.cfg.model_for_role(role))
         for c in group:
             for n in range(1, repeat + 1):
-                a = _llm_attempt(h, c, n, temperature, ctx, role)
+                a = _llm_attempt(h, c, n, temperature, ctx, role, verify_retries)
                 out.append(a)
                 on_attempt and on_attempt(a)
                 if a.skipped:
@@ -408,6 +491,19 @@ def speed_summary(attempts: list[Attempt]) -> dict:
         "median_s": secs[len(secs) // 2],
         "mean_tok_s": sum(a.completion_tokens / a.seconds for a in rows) / len(rows),  # 待ち時間込み
         "completion_tokens": sum(a.completion_tokens for a in rows),
+    }
+
+
+def verify_summary(attempts: list[Attempt]) -> dict:
+    """検証つき生成(A1)の集計: 平均の生成回数・1 回目で通った割合・エスカレーション率。"""
+    rows = [a for a in attempts if a.passed is not None and not a.error]
+    if not rows:
+        return {}
+    return {
+        "attempts": len(rows),
+        "mean_tries": sum(a.tries for a in rows) / len(rows),
+        "first_try_pass": sum(1 for a in rows if a.passed and a.tries == 1) / len(rows),
+        "escalation_rate": sum(1 for a in rows if a.escalated) / len(rows),
     }
 
 
