@@ -16,6 +16,9 @@ class FakeBackend:
         self.requests: list[dict] = []
         self.auth_headers: list[str | None] = []
         self.replies: list[str] = []  # 先頭から順に返す(空なら reply)
+        self.load_calls: list[dict] = []
+        self.load_status = 200        # /load が返す HTTP ステータス
+        self.load_effective = True    # False なら、200 を返しても、実際には読み込まない
         outer = self
 
         class H(BaseHTTPRequestHandler):
@@ -35,6 +38,16 @@ class FakeBackend:
             def do_POST(self):
                 outer.auth_headers.append(self.headers.get("Authorization"))
                 body = json.loads(self.rfile.read(int(self.headers["Content-Length"])))
+                if self.path.endswith("/load"):
+                    outer.load_calls.append(body)
+                    if outer.load_status != 200:
+                        self._send(outer.load_status, {"error": {"message": "load refused"}})
+                        return
+                    if outer.load_effective:
+                        match = [m for m in outer.available if m.lower() == body["model_path"].lower()]
+                        outer.loaded[:] = match[:1] if not body.get("alongside") else outer.loaded + match[:1]
+                    self._send(200, {"status": "loaded", "model": body["model_path"]})
+                    return
                 outer.requests.append(body)
                 if outer.delay:
                     time.sleep(outer.delay)

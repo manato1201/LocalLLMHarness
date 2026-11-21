@@ -133,3 +133,15 @@ def test_mermaid_cli_writes_only_valid(cfg_file, backend, tmp_path, capsys):
         == 1
     )
     assert not bad.exists()  # 検査に通らないものは書かない
+
+
+def test_load_cli(cfg_file, backend, capsys):
+    backend.loaded[:] = [WRITER]
+    assert run(cfg_file, "load", "--role", "main") == 0
+    assert backend.loaded == [MAIN] and "読み込みました" in capsys.readouterr().out
+    assert run(cfg_file, "load", "--role", "main") == 0
+    assert "すでに" in capsys.readouterr().out
+    assert run(cfg_file, "load", "--role", "nope") == 1
+    backend.load_status = 500
+    backend.loaded[:] = [WRITER]
+    assert run(cfg_file, "load", "--role", "main") == 2

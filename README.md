@@ -14,7 +14,7 @@
 | **モデルの振り分け** | `llh-main`(Qwen 3.5 9B)/ `llh-vision`(Qwen2.5-VL 7B)/ `llh-writer`(Gemma 4 9B)。画像があれば vision、`llh.task` で担当ロール、無ければ main。**設定に無いモデル名は断る** | A6・§3 |
 | **直列化** | VRAM 8GB なので、1 度に 1 リクエストだけ裏側へ通す。待ち時間の上限(既定 120 秒)で 503 | A13 |
 | 文脈の上限 | 入力+出力が 8192 トークン(設定可)を超えるリクエストは、裏側へ送らず 400 | §5 |
-| サーバー側ツールの遮断 | Unsloth の `enable_tools`(Python 実行・ターミナル)は**必ず外して**中継 | S1 |
+| サーバー側ツールの遮断 | Unsloth のサーバー側ツール(Python 実行・ターミナル等)の指定は全部外し、**`enable_tools=false` に固定**して中継(外すだけだと Unsloth の画面のトグルが効くため。Unsloth 0.1.922-beta の OpenAPI で確認) | S1 |
 | **監査ログ** | `logs/audit.jsonl`。**内容でなくハッシュ・件数・モデル・秒数**だけ。各行が直前の行のハッシュを持ち、削除・改ざんに気づける(`llh audit-verify`) | S4 |
 | 入口の守り | 127.0.0.1 だけで待ち受け(それ以外の `host` は起動しない)・Host の許可リスト・Origin の検査・任意のトークン | S13 |
 | 行き先の表示 | `POST /v1/route`・`llh route`:送らずに、モデル・機密度・行き先だけを返す | Z4 |
@@ -30,13 +30,26 @@ Copy-Item policy.example.toml policy.toml     # 許可するパスを自分の�
 $env:LLH_BACKEND_API_KEY = "sk-unsloth-…"      # Unsloth Desktop の Settings > API で作ったキー
 uv run llh models                              # 裏側のモデル id を確認 → config.toml の [models.*].name を合わせる
 uv run llh status                              # 裏側・読み込み済みモデル・VRAM・待ち受けの範囲
+uv run llh load --role main                    # モデルを読み込ませる(下の「1 度に 1 つ」参照)
 uv run llh smoke --role main                   # 単体動作と速さ(導入チェックリスト Step 2)
 uv run llh serve                               # http://127.0.0.1:8800/v1
 ```
 
 秘密(Unsloth の API キー・窓口のトークン)は**環境変数だけ**で渡します(`LLH_BACKEND_API_KEY`・`LLH_TOKEN`)。`config.toml`・`policy.toml`・`logs/` は `.gitignore` 済みです。
 
-**1 度に 1 つのモデルしか載りません**(VRAM 8GB)。Unsloth は API からモデルを切り替えられないので、`vision` や `writer` を使うときは、Unsloth Desktop で手で読み込みます。読み込まれていないモデルへ送ると、既定では応答ヘッダー `X-LLH-Warning` で知らせます(`backend.on_model_mismatch = "error"` で 409 にもできます)。自動アンロード(TTL)は Unsloth Desktop 側で有効にしてください。
+**1 度に 1 つのモデルしか載りません**(VRAM 8GB)。重要: Unsloth の `/v1/chat/completions` の `model` は**参考値で、実際に使われるのは読み込み済みのモデル**です(OpenAPI の記述: "informational; the active model is used")。そのため窓口は、振り分けたモデルが読み込まれていないとき、既定では応答ヘッダー `X-LLH-Warning` で知らせます(`backend.on_model_mismatch = "error"` で 409 にもできます)。今の窓口は、`vision` や `writer` を使うとき、Unsloth Desktop で手で読み込む前提です。
+
+> 設計書 §1.1 の「モデルの切り替えは API からは行えない」は、**この版(0.1.922-beta)では当てはまりません**。`POST /v1/load`(`model_path`・`gguf_variant`・`max_seq_length`・`alongside` など)と `POST /v1/unload` があります。窓口がロールに応じて自動で読み込む機能は**実装済みですが、既定では無効**です(`backend.on_model_mismatch = "load"` で有効。**偽の Unsloth でしか試していません**)。使う前に、次の順で確かめてください:
+
+```powershell
+uv run llh models                  # 裏側の id を確認 → config.toml の [models.*].name を合わせる
+uv run llh load --role main        # POST /v1/load が通り、本当に読み込まれるか(読み込み後に /v1/models で検証します)
+uv run llh smoke --role main
+```
+
+`load` のときの動き: 振り分けたモデルが読み込み済みでなければ、**直列化のロックの中で**読み込み(他のリクエストは待つ。`queue_timeout_s` を超えると 503)、読み込み後に `/v1/models` で確かめます。確かめられなければ、質問は**送らずに**502 にします(違うモデルが答えるのを防ぐ)。入れ替えは監査ログの `model_load_s` に残り、応答に `X-LLH-Model-Switched: 1` が付きます。`alongside` は常に false(VRAM 8GB)で、他のクライアントが生成中なら止めずに 409 です。名前が `リポジトリ:変種`(例 `unsloth/…-GGUF:Q4_K_M`)なら、`model_path` と `gguf_variant` に分けて渡します。合わなければ `[models.*]` に `model_path` / `gguf_variant` を明示してください。
+
+自動アンロード(TTL)は Unsloth Desktop 側で有効にしてください。
 
 ## 使い方
 

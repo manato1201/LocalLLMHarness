@@ -47,8 +47,8 @@ def collect(cfg: Config) -> dict:
     for role, spec in cfg.models.items():
         info["configured"][role] = {
             "alias": spec.alias, "name": spec.name,
-            "known_to_backend": spec.name in info["available"] if info["available"] else None,
-            "loaded": spec.name in info["loaded"] if info["available"] else None,
+            "known_to_backend": any(spec.matches(i) for i in info["available"]) if info["available"] else None,
+            "loaded": any(spec.matches(i) for i in info["loaded"]) if info["available"] else None,
         }
     gpu = gpu_status()
     info["gpu"] = None if gpu is None else {"name": gpu.name, "used_mib": gpu.used_mib, "total_mib": gpu.total_mib, "free_mib": gpu.free_mib}

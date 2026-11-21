@@ -1,6 +1,6 @@
 """推論の裏側(B1: Unsloth Desktop)への接続。OpenAI 互換 API。標準ライブラリだけ。
 
-使うのは `/models` と `/chat/completions` だけ。サーバー側ツール(`enable_tools`)は、窓口が外す(core.py)。
+使うのは `/models` と `/chat/completions` だけ。サーバー側ツール(`enable_tools` など)は、窓口が外して false に固定する(core.py)。
 """
 from __future__ import annotations
 
@@ -33,9 +33,9 @@ class Backend:
         self._models_cache: tuple[float, list[dict]] | None = None
 
     # ── 下請け ────────────────────────────────────────────
-    def _conn(self) -> http.client.HTTPConnection:
+    def _conn(self, timeout: float | None = None) -> http.client.HTTPConnection:
         cls = http.client.HTTPSConnection if self._https else http.client.HTTPConnection
-        return cls(self._host, self._port, timeout=self.cfg.backend_timeout_s)
+        return cls(self._host, self._port, timeout=timeout or self.cfg.backend_timeout_s)
 
     def _headers(self, json_body: bool) -> dict[str, str]:
         h = {"Accept": "application/json"}
@@ -46,8 +46,8 @@ class Backend:
             h["Authorization"] = f"Bearer {key}"
         return h
 
-    def _request(self, method: str, path: str, body: dict | None = None) -> tuple[http.client.HTTPConnection, http.client.HTTPResponse]:
-        conn = self._conn()
+    def _request(self, method: str, path: str, body: dict | None = None, timeout: float | None = None) -> tuple[http.client.HTTPConnection, http.client.HTTPResponse]:
+        conn = self._conn(timeout)
         payload = json.dumps(body, ensure_ascii=False).encode("utf-8") if body is not None else None
         try:
             conn.request(method, self._prefix + path, body=payload, headers=self._headers(body is not None))
@@ -85,6 +85,31 @@ class Backend:
             conn.close()
         self._models_cache = (now, data)
         return data
+
+    def load_model(self, model_path: str, gguf_variant: str = "", max_seq_length: int = 0) -> dict:
+        """`POST /v1/load`。`alongside` は常に false(VRAM 8GB。読み込み済みのモデルは入れ替わる)。
+
+        `force_cancel_active` は付けない: 他のクライアントが生成中なら、止めずに 409 で断られる。
+        """
+        body: dict = {"model_path": model_path, "alongside": False}
+        if gguf_variant:
+            body["gguf_variant"] = gguf_variant
+        if max_seq_length:
+            body["max_seq_length"] = max_seq_length
+        conn, resp = self._request("POST", "/load", body, timeout=self.cfg.load_timeout_s)
+        try:
+            raw = resp.read()
+            if resp.status != 200:
+                raise BackendError(resp.status if 400 <= resp.status < 600 else 502, self._error_message(resp.status, raw))
+            try:
+                return json.loads(raw) if raw.strip() else {}
+            except ValueError:
+                return {}  # 応答の形は、読み込み後に /models で確かめるので、ここでは問わない
+        except (OSError, http.client.HTTPException) as e:  # 読み込み中のタイムアウトなど
+            raise BackendError(504, f"モデルの読み込みの応答を待てませんでした: {e}") from e
+        finally:
+            conn.close()
+            self._models_cache = None
 
     def chat(self, body: dict) -> dict:
         conn, resp = self._request("POST", "/chat/completions", body)

@@ -58,9 +58,22 @@ def test_unknown_task_rejected(harness):
 
 # ── 裏側に渡すもの ────────────────────────────────────────
 def test_server_side_tools_and_llh_field_are_stripped(harness, backend):
-    ask(harness, enable_tools=["python", "terminal"], llh={"task": "code"}).close()
+    ask(harness, enable_tools=True, enabled_tools=["python", "terminal"], run_tools_locally=True,
+        confirm_tool_calls=False, llh={"task": "code"}).close()
     sent = backend.requests[-1]
-    assert "enable_tools" not in sent and "llh" not in sent  # 設計書 S1
+    # 設計書 S1: 外すだけでなく、false に固定する(無いと Unsloth の画面のトグルが効くため)
+    assert sent["enable_tools"] is False and "llh" not in sent
+    for k in ("enabled_tools", "run_tools_locally", "confirm_tool_calls"):
+        assert k not in sent
+
+
+def test_server_tools_flag_can_be_left_alone(cfg, backend):
+    from dataclasses import replace
+    from llh.policy import load_policy
+
+    h = Harness(replace(cfg, disable_server_tools=False), policy=load_policy(cfg.policy_path))
+    ask(h, enable_tools=True).close()
+    assert "enable_tools" not in backend.requests[-1]  # 外すだけ(false は付けない)
 
 
 def test_client_tools_pass_through(harness, backend):
@@ -255,3 +268,90 @@ def test_invalid_body(harness):
         with pytest.raises(HarnessError) as e:
             harness.chat(bad)
         assert e.value.status == 400
+
+
+# ── モデルの自動読み込み(on_model_mismatch = "load")─────────
+@pytest.fixture
+def load_harness(cfg):
+    from dataclasses import replace
+    from llh.policy import load_policy
+
+    return Harness(replace(cfg, on_model_mismatch="load"), policy=load_policy(cfg.policy_path))
+
+
+def test_load_switches_model_and_audits(load_harness, backend, cfg):
+    backend.loaded[:] = [WRITER]
+    r = ask(load_harness, llh={"task": "code"})  # main へ
+    r.close()
+    assert backend.load_calls == [{"model_path": MAIN, "alongside": False, "max_seq_length": 2000}]
+    assert backend.loaded == [MAIN]
+    assert r.headers["X-LLH-Model-Switched"] == "1"
+    assert backend.requests[-1]["model"] == MAIN  # 読み込んだあとで送っている
+    assert "model_load_s" in audit_records(cfg)[-1]
+
+
+def test_load_skipped_when_already_loaded(load_harness, backend):
+    backend.loaded[:] = [MAIN]
+    r = ask(load_harness)
+    r.close()
+    assert backend.load_calls == [] and "X-LLH-Model-Switched" not in r.headers
+
+
+def test_load_splits_repo_and_variant(cfg, backend):
+    from dataclasses import replace
+    from llh.config import ModelSpec
+    from llh.policy import load_policy
+
+    backend.available.append("org/m-GGUF")  # 裏側の id は、変種なし
+    models = dict(cfg.models)
+    models["main"] = ModelSpec("main", "llh-main", "org/m-GGUF:Q4_K_M", tasks=("code",))
+    h = Harness(replace(cfg, models=models, on_model_mismatch="load"), policy=load_policy(cfg.policy_path))
+    backend.loaded[:] = [WRITER]
+    ask(h).close()
+    call = backend.load_calls[-1]
+    assert call["model_path"] == "org/m-GGUF" and call["gguf_variant"] == "Q4_K_M" and call["alongside"] is False
+
+
+def test_load_refused_returns_error_and_releases_lock(load_harness, backend, cfg):
+    backend.loaded[:] = [WRITER]
+    backend.load_status = 500
+    with pytest.raises(HarnessError) as e:
+        ask(load_harness)
+    assert e.value.code == "model_load_failed" and e.value.status == 502
+    assert load_harness._gate.acquire(blocking=False)
+    load_harness._gate.release()
+    assert audit_records(cfg)[-1]["error"] == "model_load_failed"
+
+
+def test_load_busy_maps_to_409(load_harness, backend):
+    backend.loaded[:] = [WRITER]
+    backend.load_status = 409
+    with pytest.raises(HarnessError) as e:
+        ask(load_harness)
+    assert e.value.status == 409 and e.value.code == "model_busy"
+
+
+def test_load_not_trusted_unless_verified(load_harness, backend):
+    backend.loaded[:] = [WRITER]
+    backend.load_effective = False  # 200 を返すが、読み込まれない
+    n = len(backend.requests)
+    with pytest.raises(HarnessError) as e:
+        ask(load_harness)
+    assert e.value.code == "model_load_failed" and "読み込み済みになりません" in e.value.message
+    assert len(backend.requests) == n  # 違うモデルに質問を送っていない
+
+
+def test_load_unknown_loaded_flag_sends_anyway(load_harness, backend):
+    # 裏側が `loaded` を返さない(Unsloth 以外)なら、判断できないので、読み込みは試さずに送る
+    load_harness.backend.list_models = lambda cache_s=0.0: [{"id": MAIN}]
+    ask(load_harness).close()
+    assert backend.load_calls == [] and backend.requests[-1]["model"] == MAIN
+
+
+def test_model_matches_variants():
+    from llh.config import ModelSpec
+
+    s = ModelSpec("main", "llh-main", "unsloth/Q-GGUF:Q4_K_M")
+    assert s.matches("unsloth/Q-GGUF") and s.matches("UNSLOTH/q-gguf:q4_k_m") and not s.matches("other")
+    w = ModelSpec("main", "x", r"C:\models\a.gguf")  # ドライブの「:」は変種ではない
+    assert w.load_path == r"C:\models\a.gguf" and w.load_variant == ""

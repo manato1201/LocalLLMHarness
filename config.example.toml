@@ -11,15 +11,28 @@ token_env = "LLH_TOKEN"     # この環境変数に値があれば、Authorizati
 base_url = "http://127.0.0.1:8888/v1"
 api_key_env = "LLH_BACKEND_API_KEY"
 timeout_s = 300
-# 読み込み済みでないモデルへ送ろうとしたとき: "off"=確認しない / "warn"=応答ヘッダーで知らせる / "error"=409 で止める
-# Unsloth は API からモデルを切り替えられない(設計書 §1.1)ので、手で読み込む必要がある。
+# 振り分けたモデルが読み込み済みでないとき:
+#   "off"   確認しない
+#   "warn"  応答ヘッダー X-LLH-Warning で知らせる(既定)
+#   "error" 409 で止める
+#   "load"  Unsloth の POST /v1/load で自動で入れ替える(VRAM 8GB なので、読み込み済みのモデルは外れる)。
+#           先に `llh load --role main` で、名前の書き方と読み込みが通ることを確かめてから使う。
+#           読み込みの間(数十秒〜数分)、後続のリクエストは待つ。queue_timeout_s を超えると 503。
+# 注意: Unsloth の chat の `model` は参考値で、実際に使われるのは読み込み済みのモデル。
 on_model_mismatch = "warn"
+load_timeout_s = 900         # "load" のとき、読み込みの応答を待つ上限(秒)
+# Unsloth のサーバー側ツール(Python 実行・ターミナル等)を、全リクエストで無効にする(enable_tools=false を付ける)。
+# Unsloth 以外の裏側(llama-server 等)が、未知のフィールドを拒否するときだけ false にする。
+disable_server_tools = true
 
 # モデルの役割(ロール)。name は Unsloth の `GET /v1/models` に出る id に合わせる(`llh models` で確認)。
 # VRAM 8GB なので、同時ロードはしない。窓口は 1 度に 1 リクエストだけ通す(直列化)。
 [models.main]
 alias = "llh-main"
-name = "unsloth/Qwen3.5-9B-GGUF:Q4_K_M"       # 仮の名前。実機の id に直す
+name = "unsloth/Qwen3.5-9B-GGUF:Q4_K_M"       # 仮の名前。実機の id に直す。「リポジトリ:変種」の形なら、
+                                               # /v1/load には model_path=「:」の前、gguf_variant=「:」の後を渡す
+# model_path = "…"    # 上の分け方が合わないときだけ、明示する
+# gguf_variant = "…"
 purpose = "コード・JSON・Mermaid・git diff の要約・ログの切り分け・RAG の回答"
 tasks = ["code", "json", "mermaid", "diff", "log", "rag"]
 

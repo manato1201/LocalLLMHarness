@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import os
+import re
 import tomllib
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -22,6 +23,31 @@ class ModelSpec:
     name: str
     purpose: str = ""
     tasks: tuple[str, ...] = ()
+    model_path: str = ""     # POST /v1/load に渡す識別子。空なら name の「:」より前
+    gguf_variant: str = ""   # 例 Q4_K_M。空なら name の「:」より後
+
+    def _split(self) -> tuple[str, str]:
+        # `C:\models\x.gguf` のようなドライブの「:」は、変種の区切りとみなさない
+        if ":" in self.name and not re.match(r"^[A-Za-z]:[\\/]", self.name):
+            path, _, variant = self.name.rpartition(":")
+            return path, variant
+        return self.name, ""
+
+    @property
+    def load_path(self) -> str:
+        return self.model_path or self._split()[0]
+
+    @property
+    def load_variant(self) -> str:
+        return self.gguf_variant or self._split()[1]
+
+    def matches(self, backend_id: object) -> bool:
+        """裏側の `/v1/models` の id が、このモデルを指すか。id が変種つき・なしのどちらでも一致とみなす。"""
+        n = str(backend_id).lower()
+        cands = {self.name.lower(), self.load_path.lower()}
+        if self.load_variant:
+            cands.add(f"{self.load_path}:{self.load_variant}".lower())
+        return n in cands
 
 
 @dataclass(frozen=True)
@@ -33,6 +59,8 @@ class Config:
     backend_api_key_env: str = "LLH_BACKEND_API_KEY"
     backend_timeout_s: float = 300.0
     on_model_mismatch: str = "warn"
+    load_timeout_s: float = 900.0
+    disable_server_tools: bool = True
     models: dict[str, ModelSpec] = field(default_factory=dict)
     max_context_tokens: int = 8192
     max_output_tokens: int = 2048
@@ -107,13 +135,15 @@ def load_config(path: str | Path | None = None) -> Config:
             name=spec["name"],
             purpose=spec.get("purpose", ""),
             tasks=tuple(spec.get("tasks", ())),
+            model_path=spec.get("model_path", ""),
+            gguf_variant=spec.get("gguf_variant", ""),
         )
     if "main" not in models:
         raise ConfigError("[models.main] が必要です(既定の行き先)")
 
     on_mismatch = backend.get("on_model_mismatch", "warn")
-    if on_mismatch not in ("off", "warn", "error"):
-        raise ConfigError("backend.on_model_mismatch は off / warn / error のどれか")
+    if on_mismatch not in ("off", "warn", "error", "load"):
+        raise ConfigError("backend.on_model_mismatch は off / warn / error / load のどれか")
 
     host = server.get("host", "127.0.0.1")
     if host not in LOOPBACK_HOSTS:
@@ -133,6 +163,8 @@ def load_config(path: str | Path | None = None) -> Config:
         backend_api_key_env=backend.get("api_key_env", "LLH_BACKEND_API_KEY"),
         backend_timeout_s=float(backend.get("timeout_s", 300)),
         on_model_mismatch=on_mismatch,
+        load_timeout_s=float(backend.get("load_timeout_s", 900)),
+        disable_server_tools=bool(backend.get("disable_server_tools", True)),
         models=models,
         max_context_tokens=int(limits.get("max_context_tokens", 8192)),
         max_output_tokens=int(limits.get("max_output_tokens", 2048)),

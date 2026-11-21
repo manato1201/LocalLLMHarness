@@ -15,13 +15,21 @@ from dataclasses import dataclass, field
 
 from .audit import AuditLog, sha256_text
 from .backend import Backend, BackendError
-from .config import Config
+from .config import Config, ModelSpec
 from .policy import Policy, Verdict, load_policy
 from .router import Route, RouteError, resolve
 
 IMAGE_TOKEN_ESTIMATE = 1000
 #: 裏側へ渡さないフィールド。サーバー側ツール(Python 実行・ターミナル)は、窓口が許さない(設計書 S1)。
-STRIPPED_FIELDS = ("enable_tools", "llh")
+#: Unsloth(0.1.922-beta の OpenAPI で確認)の、サーバー側ツールの動作を決めるフィールド。全部外して、
+#: `enable_tools` は false に固定する。「外すだけ」では、フィールドが無いとき Unsloth の画面のトグルが効いてしまう
+#: (起動時のログ: "Server-side tools follow each request's enable_tools; the Unsloth UI's tool toggles decide")。
+#: 呼び出し側が実行する普通の関数呼び出し(tools / tool_choice / parallel_tool_calls)は、そのまま通す。
+SERVER_TOOL_FIELDS = (
+    "enable_tools", "enabled_tools", "run_tools_locally", "confirm_tool_calls", "nudge_tool_calls",
+    "deduplicate_tool_calls", "max_tool_calls_per_message", "tool_call_timeout", "studio_tool_history",
+)
+STRIPPED_FIELDS = ("llh", *SERVER_TOOL_FIELDS)
 
 
 class HarnessError(Exception):
@@ -139,6 +147,11 @@ class Harness:
                 self._gate.release()
 
         try:
+            if self.cfg.on_model_mismatch == "load":
+                # ロックの中で行う: 読み込みの最中に、別のリクエストが裏側へ入らないように
+                switched = self._ensure_loaded(req)
+                if switched:
+                    out_headers["X-LLH-Model-Switched"] = "1"
             if req.forward.get("stream"):
                 raw_iter = self.backend.chat_stream(req.forward)
                 return ChatResult(
@@ -151,6 +164,10 @@ class Harness:
             release()
             self._audit(request_id, user, req=req, status=e.status, error="backend", seconds=time.monotonic() - t0)
             raise HarnessError(e.status, "backend_error", e.message) from e
+        except HarnessError as e:
+            release()
+            self._audit(request_id, user, req=req, status=e.status, error=e.code, seconds=time.monotonic() - t0)
+            raise
         except BaseException:
             release()
             raise
@@ -183,6 +200,8 @@ class Harness:
         est = estimate_tokens(messages)
         forward = {k: v for k, v in body.items() if k not in STRIPPED_FIELDS}
         forward["model"] = route.model.name
+        if self.cfg.disable_server_tools:
+            forward["enable_tools"] = False
         max_out = forward.get("max_tokens", forward.get("max_completion_tokens"))
         if not isinstance(max_out, int) or max_out <= 0:
             max_out = self.cfg.default_max_tokens
@@ -198,9 +217,40 @@ class Harness:
             )
         return _Prepared(route=route, verdict=verdict, forward=forward, est_tokens=est, messages=messages)
 
+    def _ensure_loaded(self, req: "_Prepared") -> bool:
+        seconds = self.ensure_model_loaded(req.route.model)
+        req.load_seconds = seconds
+        return seconds is not None
+
+    def ensure_model_loaded(self, spec: ModelSpec) -> float | None:
+        """モデルが読み込まれていなければ、`POST /v1/load` で入れ替える。入れ替えたら、かかった秒数。不要なら None。
+
+        成功を応答だけで信じず、読み込み後に `/v1/models` で本当に読み込まれたかを確かめる。
+        呼び出し側が直列化のロックを持っていること(`llh load` は、窓口と同時に動かさない)。
+        """
+        models = self.backend.list_models()  # キャッシュなし: 画面から手で替えられた直後でも正しく判断する
+        if not any("loaded" in m for m in models):
+            return None  # 裏側が loaded を返さない → 判断できない(そのまま送る)
+        if any(m.get("loaded") and spec.matches(m.get("id")) for m in models):
+            return None
+        t = time.monotonic()
+        try:
+            self.backend.load_model(spec.load_path, spec.load_variant, self.cfg.max_context_tokens)
+        except BackendError as e:
+            code = "model_busy" if e.status == 409 else "model_load_failed"
+            raise HarnessError(e.status if e.status in (409, 503, 504) else 502, code,
+                               f"モデル '{spec.name}' を読み込めませんでした: {e.message}") from e
+        seconds = round(time.monotonic() - t, 2)
+        after = self.backend.list_models()
+        if not any(m.get("loaded") and spec.matches(m.get("id")) for m in after):
+            raise HarnessError(502, "model_load_failed",
+                               f"読み込みの要求は成功しましたが、'{spec.name}' が読み込み済みになりません。"
+                               "`llh models` で id を確かめ、config.toml の name(または model_path)を直してください")
+        return seconds
+
     def _mismatch_warning(self, route: Route) -> str:
         mode = self.cfg.on_model_mismatch
-        if mode == "off":
+        if mode in ("off", "load"):
             return ""
         try:
             models = self.backend.list_models(cache_s=5.0)
@@ -209,7 +259,7 @@ class Harness:
         if not any("loaded" in m for m in models):
             return ""  # 裏側が loaded を返さない → 判断できない
         loaded = {m.get("id") for m in models if m.get("loaded")}
-        if route.model.name in loaded:
+        if any(route.model.matches(i) for i in loaded):
             return ""
         msg = (
             f"モデル '{route.model.name}' は読み込まれていません(読み込み済み: {', '.join(sorted(map(str, loaded))) or 'なし'})。"
@@ -267,6 +317,8 @@ class Harness:
                 prompt_sha256=sha256_text(text), prompt_chars=len(text), messages=len(req.messages),
                 est_prompt_tokens=req.est_tokens, stream=bool(req.forward.get("stream")),
             )
+            if req.load_seconds is not None:
+                rec["model_load_s"] = req.load_seconds
         elif isinstance(body, dict) and isinstance(body.get("messages"), list):
             text = message_text(body["messages"])
             rec.update(prompt_sha256=sha256_text(text), prompt_chars=len(text))
@@ -287,6 +339,7 @@ class _Prepared:
     forward: dict
     est_tokens: int
     messages: list
+    load_seconds: float | None = None  # モデルを入れ替えたとき、その読み込みにかかった秒数
 
 
 def _first_message(resp: dict) -> str:

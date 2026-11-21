@@ -47,6 +47,25 @@ def cmd_models(args) -> int:
     return 0
 
 
+def cmd_load(args) -> int:
+    """ロールのモデルを、Unsloth に読み込ませる(`POST /v1/load`)。読み込み済みなら何もしない。"""
+    h = _harness(args)
+    spec = h.cfg.models.get(args.role)
+    if spec is None:
+        _out(f"[{args.role}] config に無いロールです({', '.join(h.cfg.models)})")
+        return 1
+    _out(f"[{args.role}] {spec.load_path}"
+         + (f" ({spec.load_variant})" if spec.load_variant else "")
+         + " を読み込みます(初回は時間がかかります。読み込み済みのモデルは入れ替わります)…")
+    try:
+        sec = h.ensure_model_loaded(spec)
+    except HarnessError as e:
+        _out(f"NG ({e.status} {e.code}): {e.message}")
+        return 2
+    _out("すでに読み込み済みです。" if sec is None else f"読み込みました({sec:.1f} 秒)。")
+    return 0
+
+
 def cmd_status(args) -> int:
     cfg = load_config(args.config)
     s = status_mod.collect(cfg)
@@ -207,6 +226,10 @@ def build_parser() -> argparse.ArgumentParser:
 
     sub.add_parser("serve", help="窓口(OpenAI 互換)を起動する").set_defaults(func=cmd_serve)
     sub.add_parser("models", help="裏側のモデルの id を一覧する").set_defaults(func=cmd_models)
+
+    s = sub.add_parser("load", help="ロールのモデルを Unsloth に読み込ませる(読み込み済みなら何もしない)")
+    s.add_argument("--role", default="main", help="main / vision / writer")
+    s.set_defaults(func=cmd_load)
 
     s = sub.add_parser("status", help="裏側・読み込み済みモデル・VRAM・待ち受けの範囲を確認する")
     s.add_argument("--json", action="store_true")
