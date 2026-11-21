@@ -85,7 +85,8 @@ class Backend:
         try:
             raw = resp.read()
             if resp.status != 200:
-                raise BackendError(502, self._error_message(resp.status, raw))
+                # 認証の拒否(401/403)は、原因が分かるように、そのまま伝える(窓口の利用者への 401 とは別物)
+                raise BackendError(resp.status if resp.status in (401, 403) else 502, self._error_message(resp.status, raw))
             data = json.loads(raw).get("data", [])
         except ValueError as e:
             raise BackendError(502, "推論の裏側の /models の応答が JSON ではありません") from e

@@ -157,3 +157,12 @@ def test_non_loopback_host_refused():
 
     with pytest.raises(ValueError):
         make_server(Config(host="0.0.0.0"))
+
+
+def test_health_reports_auth_failure_with_a_hint(srv, backend, monkeypatch):
+    backend.require_key = "sk-right"
+    monkeypatch.delenv("LLH_TEST_KEY", raising=False)
+    s, _, raw = call(srv, "GET", "/health")
+    d = json.loads(raw)
+    assert s == 200 and d["backend"] == "down" and d["backend_auth_failed"] is True
+    assert "LLH_TEST_KEY" in d["hint"]

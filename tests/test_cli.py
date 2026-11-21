@@ -185,3 +185,31 @@ def test_smoke_image_errors(cfg_file, tmp_path, capsys):
     bad.write_text("x")
     assert run(cfg_file, "smoke", "--role", "vision", "--image", str(bad)) == 1
     assert "対応していない拡張子" in capsys.readouterr().out
+
+
+def test_startup_checks(cfg_file, backend, monkeypatch):
+    from llh.status import startup_checks
+
+    cfg = load_config(cfg_file)
+    monkeypatch.delenv("LLH_BACKEND_API_KEY", raising=False)
+    warns = startup_checks(cfg)  # 偽の裏側は、認証を要求しない。キーが未設定なことだけを、警告する
+    assert len(warns) == 1 and "が未設定です" in warns[0] and "認証を拒否" not in warns[0]
+    backend.require_key = "sk-right"
+    warns = startup_checks(cfg)
+    assert any("LLH_BACKEND_API_KEY" in w and "が未設定です" in w for w in warns)
+    assert any("認証を拒否" in w for w in warns)
+    monkeypatch.setenv("LLH_BACKEND_API_KEY", "sk-wrong")
+    warns = startup_checks(cfg)
+    assert not any("が未設定です" in w for w in warns) and any("認証を拒否" in w for w in warns)
+    monkeypatch.setenv("LLH_BACKEND_API_KEY", "sk-right")
+    assert startup_checks(cfg) == []
+    assert all("sk-wrong" not in w and "sk-right" not in w for w in warns)
+
+
+def test_startup_checks_backend_down(tmp_path):
+    from llh.status import startup_checks
+
+    p = tmp_path / "c.toml"
+    p.write_text('[backend]\nbase_url = "http://127.0.0.1:9/v1"\n[models.main]\nname = "x"\n', encoding="utf-8")
+    warns = startup_checks(load_config(p))
+    assert any("届きません" in w for w in warns)

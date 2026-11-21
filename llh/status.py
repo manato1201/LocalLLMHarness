@@ -53,3 +53,25 @@ def collect(cfg: Config) -> dict:
     gpu = gpu_status()
     info["gpu"] = None if gpu is None else {"name": gpu.name, "used_mib": gpu.used_mib, "total_mib": gpu.total_mib, "free_mib": gpu.free_mib}
     return info
+
+
+def startup_checks(cfg: Config) -> list[str]:
+    """`llh serve` の起動時の確認。問題があれば、直し方つきの警告の一覧(空なら問題なし)。キーの値は出さない。"""
+    warns: list[str] = []
+    env = cfg.backend_api_key_env
+    if not cfg.backend_api_key:
+        warns.append(
+            f"環境変数 {env}(Unsloth の API キー)が未設定です。`setx` で保存したあとは、新しく開いた PowerShell で起動し直してください"
+            "(開いていたウィンドウには効きません)。"
+        )
+    try:
+        Backend(cfg).list_models()
+    except BackendError as e:
+        if e.status in (401, 403):
+            warns.append(
+                f"Unsloth({cfg.backend_base_url})が認証を拒否しました。{env} のキーが未設定か、違います。"
+                "Settings > API で作ったキーを確かめてください。"
+            )
+        else:
+            warns.append(f"Unsloth({cfg.backend_base_url})に届きません: {e.message}")
+    return warns

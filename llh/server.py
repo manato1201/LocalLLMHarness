@@ -180,6 +180,9 @@ def make_server(cfg: Config, harness: Harness | None = None, port: int | None = 
                 info["loaded"] = sorted(str(m.get("id")) for m in models if m.get("loaded"))
             except BackendError as e:
                 info["backend_error"] = e.message
+                if e.status in (401, 403):
+                    info["backend_auth_failed"] = True
+                    info["hint"] = harness.backend_error(e).message
             return info
 
     return ThreadingHTTPServer((cfg.host, listen_port), Handler)
@@ -190,6 +193,10 @@ def serve(cfg: Config) -> None:
     host, port = server.server_address[:2]
     print(f"llh: http://{host}:{port}/v1 で待ち受け中(裏側: {cfg.backend_base_url})")
     print(f"     認証: {'トークンあり' if cfg.token else 'なし(loopback のみ)'} / 監査ログ: {cfg.audit_path}")
+    from .status import startup_checks
+
+    for w in startup_checks(cfg):
+        print(f"     [警告] {w}")
     try:
         server.serve_forever()
     except KeyboardInterrupt:

@@ -162,8 +162,10 @@ class Harness:
             resp = self.backend.chat(req.forward)
         except BackendError as e:
             release()
-            self._audit(request_id, user, req=req, status=e.status, error="backend", seconds=time.monotonic() - t0)
-            raise HarnessError(e.status, "backend_error", e.message) from e
+            he = self.backend_error(e)
+            self._audit(request_id, user, req=req, status=he.status, error=he.code if he.code == "backend_auth_failed" else "backend",
+                        seconds=time.monotonic() - t0)
+            raise he from e
         except HarnessError as e:
             release()
             self._audit(request_id, user, req=req, status=e.status, error=e.code, seconds=time.monotonic() - t0)
@@ -178,6 +180,18 @@ class Harness:
             output=content, usage=resp.get("usage"),
         )
         return ChatResult(headers=out_headers, body=resp)
+
+    def backend_error(self, e: BackendError) -> HarnessError:
+        """裏側のエラーを、窓口の利用者に返す形にする。認証の拒否は、直し方まで伝える(キーの値は出さない)。"""
+        if e.status in (401, 403):
+            env = self.cfg.backend_api_key_env
+            if self.cfg.backend_api_key:
+                cause = f"環境変数 {env} の値(Unsloth の API キー)が違うようです。Settings > API で作り直してください。"
+            else:
+                cause = (f"窓口のプロセスに、環境変数 {env}(Unsloth の API キー)が渡っていません。`setx` で保存したあとは、"
+                         "新しく開いた PowerShell で `llh serve` を起動し直してください(開いていたウィンドウには効きません)。")
+            return HarnessError(502, "backend_auth_failed", f"裏側(Unsloth)が認証を拒否しました。{cause}")
+        return HarnessError(e.status, "backend_error", e.message)
 
     # ── 内部 ───────────────────────────────────────────────
     def _prepare(self, body: dict, headers: dict[str, str]) -> "_Prepared":

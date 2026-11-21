@@ -19,6 +19,7 @@ class FakeBackend:
         self.load_calls: list[dict] = []
         self.load_status = 200        # /load が返す HTTP ステータス
         self.load_effective = True    # False なら、200 を返しても、実際には読み込まない
+        self.require_key: str | None = None  # 設定すると、このキーの Bearer が無い要求を 401 で断る(Unsloth の挙動)
         outer = self
 
         class H(BaseHTTPRequestHandler):
@@ -27,8 +28,16 @@ class FakeBackend:
             def log_message(self, *a):
                 pass
 
+            def _denied(self) -> bool:
+                if outer.require_key and self.headers.get("Authorization") != f"Bearer {outer.require_key}":
+                    self._send(401, {"error": {"message": "Not authenticated", "type": "authentication_error"}})
+                    return True
+                return False
+
             def do_GET(self):
                 outer.auth_headers.append(self.headers.get("Authorization"))
+                if self._denied():
+                    return
                 if self.path.endswith("/models"):
                     data = [{"id": m, "object": "model", "loaded": m in outer.loaded} for m in outer.available]
                     self._send(200, {"object": "list", "data": data})
@@ -37,6 +46,8 @@ class FakeBackend:
 
             def do_POST(self):
                 outer.auth_headers.append(self.headers.get("Authorization"))
+                if self._denied():
+                    return
                 body = json.loads(self.rfile.read(int(self.headers["Content-Length"])))
                 if self.path.endswith("/load"):
                     outer.load_calls.append(body)

@@ -381,3 +381,30 @@ def test_request_thinking_overrides_role_default(cfg, backend):
 def test_thinking_not_sent_when_unset(cfg, backend):
     ask(_with_thinking(cfg, None), model="llh-writer").close()
     assert "enable_thinking" not in backend.requests[-1]
+
+
+# ── 裏側(Unsloth)の認証拒否 ────────────────────────────
+def test_backend_auth_failure_gives_actionable_error(harness, backend, cfg, monkeypatch):
+    backend.require_key = "sk-right"
+    monkeypatch.delenv("LLH_TEST_KEY", raising=False)  # 窓口のプロセスに、キーが渡っていない状態
+    for h in (harness, ):
+        with pytest.raises(HarnessError) as e:
+            ask(h)
+        assert e.value.status == 502 and e.value.code == "backend_auth_failed"
+        assert "LLH_TEST_KEY" in e.value.message and "新しく開いた" in e.value.message
+        assert "sk-right" not in e.value.message
+    assert audit_records(cfg)[-1]["error"] == "backend_auth_failed"
+
+
+def test_backend_auth_failure_also_in_load_mode(load_harness, backend, monkeypatch):
+    backend.require_key = "sk-right"
+    monkeypatch.setenv("LLH_TEST_KEY", "sk-wrong")
+    with pytest.raises(HarnessError) as e:
+        ask(load_harness)
+    assert e.value.code == "backend_auth_failed" and "違" in e.value.message
+
+
+def test_correct_key_passes(harness, backend, monkeypatch):
+    backend.require_key = "sk-right"
+    monkeypatch.setenv("LLH_TEST_KEY", "sk-right")
+    ask(harness).close()
