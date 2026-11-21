@@ -25,6 +25,7 @@ class ModelSpec:
     tasks: tuple[str, ...] = ()
     model_path: str = ""     # POST /v1/load に渡す識別子。空なら name の「:」より前
     gguf_variant: str = ""   # 例 Q4_K_M。空なら name の「:」より後
+    enable_thinking: bool | None = None  # 考える(thinking)モードの既定。None=モデルまかせ。リクエストで指定があればそちらが優先
 
     def _split(self) -> tuple[str, str]:
         # `C:\models\x.gguf` のようなドライブの「:」は、変種の区切りとみなさない
@@ -137,6 +138,7 @@ def load_config(path: str | Path | None = None) -> Config:
             tasks=tuple(spec.get("tasks", ())),
             model_path=spec.get("model_path", ""),
             gguf_variant=spec.get("gguf_variant", ""),
+            enable_thinking=_opt_bool(spec.get("enable_thinking"), f"[models.{role}].enable_thinking"),
         )
     if "main" not in models:
         raise ConfigError("[models.main] が必要です(既定の行き先)")
@@ -176,6 +178,12 @@ def load_config(path: str | Path | None = None) -> Config:
         local_only=bool(mode.get("local_only", True)),
         mermaid_require_init_line=bool(mermaid.get("require_init_line", False)),
     )
+
+
+def _opt_bool(value: object, where: str) -> bool | None:
+    if value is None or isinstance(value, bool):
+        return value
+    raise ConfigError(f"{where} は true / false のどちらかです")
 
 
 def _policy_default() -> Path:

@@ -45,6 +45,8 @@ tasks = ["vision", "screen"]
 [models.writer]
 alias = "llh-writer"
 name = "unsloth/gemma-4-9b-it-GGUF:Q4_K_M"    # 仮の名前
+# enable_thinking = false   # 考える(thinking)モードを切る。Gemma 4 は既定で有効で、出力の枠を使い切って本文が空になることがある。
+#                           # 未指定ならモデルまかせ。リクエストの enable_thinking があれば、そちらが優先(設計書 A10)
 purpose = "日本語の文書・長文ノートの要約と整理"
 tasks = ["doc", "summary", "note"]
 

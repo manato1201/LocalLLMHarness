@@ -355,3 +355,29 @@ def test_model_matches_variants():
     assert s.matches("unsloth/Q-GGUF") and s.matches("UNSLOTH/q-gguf:q4_k_m") and not s.matches("other")
     w = ModelSpec("main", "x", r"C:\models\a.gguf")  # ドライブの「:」は変種ではない
     assert w.load_path == r"C:\models\a.gguf" and w.load_variant == ""
+
+
+# ── 考える(thinking)モードの既定 ────────────────────────
+def _with_thinking(cfg, value):
+    from dataclasses import replace
+    from llh.config import ModelSpec
+    from llh.policy import load_policy
+
+    models = dict(cfg.models)
+    models["writer"] = ModelSpec("writer", "llh-writer", WRITER, tasks=("doc",), enable_thinking=value)
+    return Harness(replace(cfg, models=models), policy=load_policy(cfg.policy_path))
+
+
+def test_role_thinking_default_is_sent(cfg, backend):
+    ask(_with_thinking(cfg, False), model="llh-writer").close()
+    assert backend.requests[-1]["enable_thinking"] is False
+
+
+def test_request_thinking_overrides_role_default(cfg, backend):
+    ask(_with_thinking(cfg, False), model="llh-writer", enable_thinking=True).close()
+    assert backend.requests[-1]["enable_thinking"] is True
+
+
+def test_thinking_not_sent_when_unset(cfg, backend):
+    ask(_with_thinking(cfg, None), model="llh-writer").close()
+    assert "enable_thinking" not in backend.requests[-1]

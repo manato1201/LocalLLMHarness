@@ -154,3 +154,18 @@ def test_invalid_api_key_gives_readable_error(cfg_file, monkeypatch, capsys, bad
     out = capsys.readouterr().out
     assert "LLH_BACKEND_API_KEY" in out and "不正" in out
     assert "SECRETMARK" not in out  # キーの中身は出さない
+
+
+def test_config_thinking_must_be_bool(tmp_path):
+    p = tmp_path / "c.toml"
+    p.write_text('[models.main]\nname = "x"\nenable_thinking = "no"\n', encoding="utf-8")
+    with pytest.raises(ConfigError):
+        load_config(p)
+    p.write_text('[models.main]\nname = "x"\nenable_thinking = false\n', encoding="utf-8")
+    assert load_config(p).models["main"].enable_thinking is False
+
+
+def test_smoke_warns_on_empty_reply(cfg_file, backend, capsys):
+    backend.reply = ""
+    assert run(cfg_file, "smoke") == 0
+    assert "本文が空" in capsys.readouterr().out

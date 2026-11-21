@@ -202,6 +202,8 @@ class Harness:
         forward["model"] = route.model.name
         if self.cfg.disable_server_tools:
             forward["enable_tools"] = False
+        if route.model.enable_thinking is not None and forward.get("enable_thinking") is None:
+            forward["enable_thinking"] = route.model.enable_thinking  # 呼び出し側の指定があれば、それを優先
         max_out = forward.get("max_tokens", forward.get("max_completion_tokens"))
         if not isinstance(max_out, int) or max_out <= 0:
             max_out = self.cfg.default_max_tokens

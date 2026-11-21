@@ -104,8 +104,13 @@ def cmd_smoke(args) -> int:
             prompt, max_tok = "1+1 は? 数字だけで答えて。", 32
         body = {"model": spec.alias, "temperature": 0, "max_tokens": max_tok,
                 "messages": [{"role": "user", "content": prompt}]}
-        t0 = time.monotonic()
         try:
+            if h.cfg.on_model_mismatch == "load":
+                # モデルの入れ替えは別に測る(生成速度に混ぜない)
+                sec = h.ensure_model_loaded(spec)
+                if sec is not None:
+                    _out(f"[{role}] モデルを入れ替えました({sec:.1f} 秒)")
+            t0 = time.monotonic()
             res = h.chat(body)
         except HarnessError as e:
             _out(f"[{role}] {spec.name}: NG ({e.status} {e.code}) {e.message}")
@@ -113,12 +118,20 @@ def cmd_smoke(args) -> int:
             continue
         try:
             dt = time.monotonic() - t0
-            reply = (res.body["choices"][0]["message"].get("content") or "").strip()
+            choice = (res.body.get("choices") or [{}])[0]
+            message = choice.get("message") or {}
+            reply = (message.get("content") or "").strip()
             usage = res.body.get("usage") or {}
             ct = usage.get("completion_tokens")
-            note = "(待ち時間込み)" if args.long else "(出力が短いので目安にならない。--long で測る)"
+            note = "(プロンプトの処理を含む)" if args.long else "(出力が短いので目安にならない。--long で測る)"
             speed = f"{ct / dt:.1f} tok/s{note}" if ct and dt > 0 else "tok/s 不明"
             _out(f"[{role}] {spec.name}: OK {dt:.1f}s  出力 {ct} トークン  {speed}  応答: {reply[:40]!r}")
+            if not reply:
+                # 考える(thinking)モードが、出力の枠を使い切った可能性。原因の手がかりを出す
+                extra = [k for k in message if k not in ("role", "content")]
+                _out(f"    注意: 応答の本文が空です(finish_reason={choice.get('finish_reason')}、他のフィールド: {extra or 'なし'})。"
+                     f"考える(thinking)モードが出力を使い切った可能性があります。config.toml の [models.{role}] に "
+                     "enable_thinking = false を試してください")
             gpu = status_mod.gpu_status()
             if gpu:
                 _out(f"    GPU: 使用 {gpu.used_mib} / {gpu.total_mib} MiB(空き {gpu.free_mib} MiB)")
