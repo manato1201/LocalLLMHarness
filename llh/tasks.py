@@ -13,7 +13,7 @@ from . import mermaid
 from .core import Harness, HarnessError
 
 #: 読み取り専用の git だけ。ここに無いサブコマンドは、この関数では走らせない。
-_GIT_READONLY = {"diff", "log", "status", "rev-parse"}
+_GIT_READONLY = {"diff", "log", "status", "rev-parse", "show", "ls-files"}
 
 SUMMARY_MAX_TOKENS = 700
 PROMPT_OVERHEAD_TOKENS = 700  # 指示文・--stat・最近のコミットの分

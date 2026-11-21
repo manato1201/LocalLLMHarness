@@ -24,6 +24,7 @@
 | 検証つき生成・エスカレーション | `verified_generate`:生成 → 機械で検証 → 失敗の内容を渡して作り直し(最大 N 回)。通らなければ `escalate`(内容を残さず、ハッシュと検証の詳細だけを `logs/escalations.jsonl` に記録) | A1・A6 |
 | Claude Code 用の MCP | `llh mcp`(local-llm-mcp):`local_summarize` / `local_classify` / `local_extract` / `local_ask_docs` / `local_embed`。**結果は Claude に渡るので、外に出さない区分の入力は断る**。[docs/MCP.md](docs/MCP.md) | Phase 5・I9 |
 | 微調整の準備 | `llh export-sft`:検証に通った生成を、学習データにまとめる(外に出さない区分・評価セットと同じ質問は除く)。**学習はしない**。[docs/PHASE6.md](docs/PHASE6.md) | Phase 6 |
+| 評価問題の案 | `llh draft-cases`:**公開リポジトリのコミット済みの内容**(コミット・文書・図)から、機械で採点できる問題の案を作り、確認用の一覧(`evals/drafts/REVIEW.md`)を出す。正解は元の事実から取る。[evals/README.md](evals/README.md) | §8 |
 
 ## クイックスタート
 
@@ -69,6 +70,7 @@ uv run llh eval --verify-retries 2                    # 検証つき生成(A1)�
 uv run llh summarize C:\docs\long.md              # 長い文書を、分割して要約する
 uv run llh mcp                                        # Claude Code 用の MCP サーバー(登録は docs/MCP.md)
 uv run llh export-sft                                 # 検証に通った生成を、学習データにまとめる(Phase 6 の準備)
+uv run llh draft-cases                                # 評価問題の案を、公開リポジトリの実際のコミット・文書から作る(evals/drafts。人が確認してから使う)
 ```
 
 呼び出し側(Python などの OpenAI クライアント)は、`base_url="http://127.0.0.1:8800/v1"`、`model="llh-main"`(または `auto`)にします。追加の指定は、リクエストの本体の `llh` で:

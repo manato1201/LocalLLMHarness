@@ -456,3 +456,21 @@ def test_tool_call_validity_checks_shape_only(harness, backend):
     a = evals.run_eval(harness, [case], repeat=1, verify_retries=1)[0]
     assert a.tries == 2 and "ツール呼び出しが無い" in backend.requests[1]["messages"][-1]["content"]
     assert "東京" not in backend.requests[1]["messages"][-1]["content"]
+
+
+# ── 追加の採点: count / tool_call の複数候補・禁止 ───────────────
+def test_count_scoring():
+    spec = {"type": "count", "words": ["alpha", "beta", "gamma", "delta"], "min": 2}
+    assert sc(spec, "Alpha と BETA がある")[0]
+    ok, d = sc(spec, "alpha だけ")
+    assert not ok and "1/2" in d
+    assert sc({"type": "count", "words": ["x"]}, "x")[0], "min の既定は 1"
+
+
+def test_tool_call_alternative_names_and_forbidden():
+    call = lambda *names: {"content": None, "tool_calls": [{"function": {"name": n, "arguments": "{}"}} for n in names]}
+    spec = {"type": "tool_call", "names": ["git_status", "git_diff_summary"], "not_names": ["git_push"]}
+    assert sc(spec, message=call("git_diff_summary"))[0]
+    assert not sc(spec, message=call("git_commit"))[0]
+    ok, d = sc(spec, message=call("git_status", "git_push"))
+    assert not ok and "git_push" in d, "2 つ目以降の呼び出しでも、禁止の関数は見逃さない"

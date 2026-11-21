@@ -349,6 +349,24 @@ def cmd_export_sft(args) -> int:
     return 0
 
 
+def cmd_draft_cases(args) -> int:
+    """公開リポジトリの実際のコミット・文書から、評価問題の「案」を作る(人が確認してから使う)。"""
+    from . import draft
+    from .config import ROOT
+
+    cfg = load_config(args.config)
+    policy = load_policy(cfg.policy_path)
+    root = Path(args.root) if args.root else ROOT.parent
+    out = Path(args.out) if args.out else ROOT / "evals" / "drafts"
+    ds = draft.build_all(root, policy)
+    counts = draft.write_drafts(ds, out)
+    _out(f"案を作りました: 合計 {sum(counts.values())} 件({out})")
+    for k, n in counts.items():
+        _out(f"  {draft.KIND_TITLE[k]}: {n}")
+    _out(f"除外: {len(ds.skipped)} 件(外に出さない区分を含む・文書が変わって根拠が見つからない など)。確認用の一覧: {out / 'REVIEW.md'}")
+    return 0
+
+
 def cmd_route(args) -> int:
     h = _harness(args)
     text = sys.stdin.read() if args.text == "-" else args.text
@@ -507,6 +525,11 @@ def build_parser() -> argparse.ArgumentParser:
     s.add_argument("--no-verified", action="store_true", help="logs/verified.jsonl を使わない(--extra だけ)")
     s.add_argument("--no-eval-guard", action="store_true", help="評価セットとの重複の除外をしない(非推奨)")
     s.set_defaults(func=cmd_export_sft)
+
+    s = sub.add_parser("draft-cases", help="公開リポジトリのコミット・文書から、評価問題の案を作る(evals/drafts。人が確認してから使う)")
+    s.add_argument("--root", help="リポジトリが並ぶフォルダ(既定: このリポジトリの親)")
+    s.add_argument("--out", help="書き出し先(既定: evals/drafts)")
+    s.set_defaults(func=cmd_draft_cases)
 
     s = sub.add_parser("route", help="送らずに、行き先・モデル・機密度だけを表示する")
     s.add_argument("text", help="質問の文('-' で標準入力)")

@@ -12,6 +12,7 @@ from __future__ import annotations
 import hashlib
 import json
 import re
+import unicodedata
 import subprocess
 import sys
 import tempfile
@@ -32,7 +33,7 @@ REPLY_KEEP_CHARS = 1500       # 結果に残す出力の長さ(デバッグ用�
 CATEGORY_ROLE = {
     "要約・分類": "writer", "文書": "writer",
 }
-VALID_SCORE_TYPES = {"exact", "contains", "any", "regex", "label", "json", "mermaid", "citation", "python", "tool_call", "policy"}
+VALID_SCORE_TYPES = {"exact", "contains", "any", "count", "regex", "label", "json", "mermaid", "citation", "python", "tool_call", "policy"}
 
 
 class EvalError(ValueError):
@@ -130,6 +131,11 @@ def load_cases(path: str | Path) -> list[Case]:
 
 
 # ── 採点 ────────────────────────────────────────────────
+def _fold(s: str) -> str:
+    """語の一致の比較用: 全角・半角の違い(NFKC)・空白・大文字小文字を無視する。日本語では、空白の有無は意味の違いではない。"""
+    return re.sub(r"\s+", "", unicodedata.normalize("NFKC", s)).casefold()
+
+
 def _norm(s: str) -> str:
     return re.sub(r"\s+", " ", s).strip().strip("。.!！ ").casefold()
 
@@ -170,6 +176,12 @@ def _score_one(spec: dict, reply: str, message: dict, ctx: "ScoreContext") -> tu
     if t == "any":
         ok = any(str(w).casefold() in low for w in spec["any"])
         return ok, "" if ok else f"どれも含まれない: {spec['any']}"
+    if t == "count":   # words のうち、min 個以上を含む(要約など、決まった語を全部は要求できないもの)
+        words = [str(w) for w in spec["words"]]
+        folded = _fold(reply)
+        hit = [w for w in words if _fold(w) in folded]
+        need = int(spec.get("min", 1))
+        return len(hit) >= need, "" if len(hit) >= need else f"{len(hit)}/{need} 個しか含まれない(候補 {len(words)} 個)"
     if t == "regex":
         ok = re.search(spec["pattern"], reply, re.IGNORECASE if spec.get("ignore_case", True) else 0) is not None
         return ok, "" if ok else f"一致しない: {spec['pattern']}"
@@ -225,8 +237,13 @@ def _score_one(spec: dict, reply: str, message: dict, ctx: "ScoreContext") -> tu
         if not calls:
             return False, "ツール呼び出しが無い"
         fn = calls[0].get("function", {})
-        if fn.get("name") != spec["name"]:
-            return False, f"呼んだ関数: {fn.get('name')}(期待: {spec['name']})"
+        called = [c.get("function", {}).get("name") for c in calls]
+        bad = [n for n in called if n in spec.get("not_names", [])]
+        if bad:
+            return False, f"呼んではいけない関数を呼んだ: {bad}"
+        allowed = spec.get("names") or [spec["name"]]
+        if fn.get("name") not in allowed:
+            return False, f"呼んだ関数: {fn.get('name')}(期待: {allowed})"
         try:
             args = json.loads(fn.get("arguments") or "{}")
         except ValueError:
