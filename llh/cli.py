@@ -211,6 +211,78 @@ def cmd_bench(args) -> int:
     return 1 if bad == len(rows) else 0
 
 
+def cmd_eval(args) -> int:
+    """評価セットを解いて、区分ごとの合格率・速度を出す(設計書 §8)。基準(Claude)があれば、ローカルに回せるかも出す。"""
+    import time as _time
+
+    from . import evals
+    from .config import ROOT
+
+    h = _harness(args)
+    try:
+        cases = evals.load_cases(args.cases or ROOT / "evals" / "cases")
+        baseline = evals.load_baseline(args.baseline) if args.baseline else None
+    except evals.EvalError as e:
+        _out(f"評価セットのエラー: {e}")
+        return 1
+    if args.category:
+        cases = [c for c in cases if c.category in args.category]
+    if args.id:
+        cases = [c for c in cases if c.id in args.id]
+    if args.limit:
+        cases = cases[: args.limit]
+    if not cases:
+        _out("該当する問題がありません。")
+        return 1
+    llm_cases = [c for c in cases if not c.is_policy]
+    _out(f"{len(cases)} 問(うち LLM に解かせるのは {len(llm_cases)} 問)× {args.repeat} 回、温度 {args.temperature}。"
+         + ("コードの実行: ON(サンドボックスではありません)" if args.allow_exec else ""))
+
+    def tick(a) -> None:
+        print("." if a.passed else ("s" if a.passed is None else "x"), end="", flush=True)
+
+    try:
+        attempts = evals.run_eval(h, cases, repeat=args.repeat, temperature=args.temperature, allow_exec=args.allow_exec,
+                                  default_role=args.role, on_attempt=tick)
+    except HarnessError as e:
+        print()
+        _out(f"NG ({e.status} {e.code}): {e.message}")
+        return 2
+    print()
+    stats = evals.case_stats(attempts)
+    rates = evals.category_rates(stats)
+    _out(f"\n{'区分':<14}{'問題数':>6}{'合格率':>8}")
+    for cat, (rate, n) in sorted(rates.items()):
+        _out(f"{cat:<14}{n:>6}{rate:>8.0%}")
+    errors = [a for a in attempts if a.error]
+    fails = [a for a in attempts if a.passed is False and not a.error]
+    for a in (errors + fails)[:15]:
+        _out(f"  × {a.case_id} #{a.attempt}: {a.error or a.detail}")
+    if len(errors) + len(fails) > 15:
+        _out(f"  … ほか {len(errors) + len(fails) - 15} 件")
+    skipped = {a.case_id: a.skipped for a in attempts if a.skipped}
+    if skipped:
+        _out(f"採点しなかった問題: {len(skipped)} 件({next(iter(skipped.values()))})")
+    sp = evals.speed_summary(attempts)
+    if sp:
+        _out(f"速度: 1 問の中央値 {sp['median_s']:.1f} 秒、{sp['mean_tok_s']:.0f} tok/s(待ち時間込み)")
+    if baseline is not None:
+        comps = evals.compare(stats, baseline)
+        _out(f"\n基準との比較(合格率が基準の {evals.PASS_RATIO_FOR_LOCAL:.0%} 以上なら、その区分はローカルに回す):")
+        for c in comps:
+            _out(f"  {c.category:<12} 問題 {c.cases:>2}  ローカル {c.local:>4.0%}  基準 {c.baseline:>4.0%}  → {c.verdict}")
+        if not comps:
+            _out("  基準にも載っている問題がありません(id を合わせてください)。")
+    out_dir = Path(args.out) if args.out else ROOT / "evals" / "results"
+    path = out_dir / f"{_time.strftime('%Y%m%d-%H%M%S')}-{args.role}.jsonl"
+    evals.write_results(path, h, attempts, {
+        "ts": _time.strftime("%Y-%m-%dT%H:%M:%S%z"), "repeat": args.repeat, "temperature": args.temperature,
+        "cases_sha256": evals.cases_fingerprint(cases), "cases": len(cases), "default_role": args.role,
+    })
+    _out(f"\n結果: {path}(出力の抜粋を含むので、ローカルのみ。git には入れない)")
+    return 0 if not errors else 1
+
+
 def cmd_route(args) -> int:
     h = _harness(args)
     text = sys.stdin.read() if args.text == "-" else args.text
@@ -338,6 +410,19 @@ def build_parser() -> argparse.ArgumentParser:
     s.add_argument("--out-tokens", type=int, default=64, help="出力の最大トークン数(既定 64)")
     s.add_argument("--no-warmup", action="store_true", help="最初の捨て測定をしない")
     s.set_defaults(func=cmd_bench)
+
+    s = sub.add_parser("eval", help="評価セット(evals/cases)を解いて、区分ごとの合格率・速度を出す")
+    s.add_argument("--cases", help="問題のファイル(.jsonl)かフォルダ(既定: evals/cases)")
+    s.add_argument("--category", action="append", help="この区分だけ(複数可)")
+    s.add_argument("--id", action="append", help="この id だけ(複数可)")
+    s.add_argument("--role", default="main", help="区分に既定のロールが無い問題を解くロール(既定 main)")
+    s.add_argument("--repeat", type=int, default=3, help="各問を解く回数(既定 3)")
+    s.add_argument("--temperature", type=float, default=0.0, help="温度(既定 0。固定する)")
+    s.add_argument("--limit", type=int, help="先頭の N 問だけ(試し用)")
+    s.add_argument("--baseline", help="基準(Claude など)の問題ごとの合格率。{id: 0〜1} の JSON か、この `eval` の結果(.jsonl)")
+    s.add_argument("--allow-exec", action="store_true", help="生成されたコードを実行して採点する(サンドボックスではない。自分で確認した問題だけに)")
+    s.add_argument("--out", help="結果の保存先フォルダ(既定: evals/results)")
+    s.set_defaults(func=cmd_eval)
 
     s = sub.add_parser("route", help="送らずに、行き先・モデル・機密度だけを表示する")
     s.add_argument("text", help="質問の文('-' で標準入力)")

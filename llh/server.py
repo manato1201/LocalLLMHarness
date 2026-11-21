@@ -39,10 +39,21 @@ def make_server(cfg: Config, harness: Harness | None = None, port: int | None = 
             names = ("127.0.0.1", "localhost", "[::1]")
             return {f"{n}:{actual}" for n in names} | {f"{n}:{cfg.port}" for n in names}
 
+        def _drain(self) -> None:
+            """断る前に、送られてきた本体を読み捨てる(読まずに閉じると、送信中のクライアントに接続リセットが届き、
+            断った理由(403/401)が伝わらないことがある)。"""
+            try:
+                n = min(int(self.headers.get("Content-Length") or 0), 1 << 20)
+                if n > 0:
+                    self.rfile.read(n)
+            except (ValueError, OSError):
+                pass
+
         def _guard(self) -> str | None:
             """通してよければユーザー名("" も可)、止めたら None(応答済み)。"""
             host = (self.headers.get("Host") or "").lower()
             if host not in self._allowed_hosts():
+                self._drain()
                 self._json(403, {"error": {"message": "Host が許可されていません", "type": "forbidden"}})
                 return None
             origin = self.headers.get("Origin")
@@ -50,6 +61,7 @@ def make_server(cfg: Config, harness: Harness | None = None, port: int | None = 
                 o = urlsplit(origin)
                 origin_host = f"{o.hostname}:{o.port}" if o.port else (o.hostname or "")
                 if f"{origin_host}".lower().replace("::1", "[::1]") not in self._allowed_hosts():
+                    self._drain()
                     self._json(403, {"error": {"message": "Origin が許可されていません", "type": "forbidden"}})
                     return None
             token = cfg.token
@@ -57,6 +69,7 @@ def make_server(cfg: Config, harness: Harness | None = None, port: int | None = 
                 auth = self.headers.get("Authorization", "")
                 given = auth[7:] if auth.lower().startswith("bearer ") else ""
                 if not hmac.compare_digest(given.encode(), token.encode()):
+                    self._drain()
                     self._json(401, {"error": {"message": "認証が必要です", "type": "unauthorized"}},
                                extra={"WWW-Authenticate": "Bearer"})
                     return None
