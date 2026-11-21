@@ -20,9 +20,9 @@
 - 既定は `claude` のままです(動作を変えていません)。`local` のときは `ANTHROPIC_API_KEY` が要りません。
 - 利用者の権限(namespace)の絞り込みは、バックエンドによらず同じです(権限の無い資料は、ローカルのモデルにも渡しません)。テストで確認しています。
 - 窓口が止まっているときは、「`uv run llh serve` を起動してください」と出ます(500)。
-- **Houdini のパネル(`rag_chatbot.py`)の切り替え欄は、まだ `claude` / `gemini` だけです。**`local` を選ぶには、環境変数か `/api/llm-backend` を使います。
+- **Houdini のパネル(`rag_chatbot.py`)の切り替え欄には、`local` を足しません**(2026-11-21 に決定)。`local` を選ぶには、環境変数か `/api/llm-backend` を使います。
 - 変更: `scripts/rag_local_bridge.py`、テスト `houdini/tests/test_local_backend.py`(11 件)。
-- **`Enterprises/AXTechCare/RAGEnvironment/scripts/rag_local_bridge.py` は、触っていません**(同名の別コピー)。「外に出さない」区分(Enterprises 配下)に当たるので、`local` を既定にすることを検討してください。
+- **`Enterprises/AXTechCare/RAGEnvironment/scripts/rag_local_bridge.py`(同名の別コピー)は、触りません**。`local` を既定にもしません(2026-11-21 に決定)。
 
 ### 1-b. `local-chat`
 
@@ -46,7 +46,8 @@ $env:VLM_LLM_API_KEY_ENV = "LLH_TOKEN"         # 窓口にトークンを付け�
 
 通しの確認(2026-11-21): `python -m vlm_auto_replay.ask --image <画面のキャプチャ> "この画面の状態を、1 文で説明して"` が、窓口 → Qwen3.5-9B で、画面の内容を正しく説明しました(監査ログ: `role: vision`・`status: 200`・約 34 秒)。
 
-- **遅さに注意**: 4K 級の画面全体の画像は、入力が約 2000 トークンになり、約 34 秒かかります。自動操作で何度も呼ぶなら、**画像を縮小して**(幅 1280px 程度)から渡してください。
+- **画像は、VLMAutoReplayTool 側で縮小して送ります**(2026-11-21 に追加)。最長辺 1280px が既定で、`VLM_LLM_MAX_IMAGE_EDGE`(0 で縮小しない)か、`OpenAICompatClient(max_image_edge=…)` で変えられます。縮小には Pillow が要ります(`uv sync --extra vision`。無ければ、警告を 1 回出して、そのまま送ります)。
+  縮小する前は、4K 級の画面全体で入力が約 2000 トークン・約 34 秒でした。**縮小後の実測は、未確認です**(`ask` で、縮小あり・なしを比べてください)。
 - 画像は `image_url`(data URI)で来るので、窓口は**画像のデータを機密度の検査に使いません**(文字だけ検査)。画面キャプチャに写った秘密は、この検査では見つけられません。窓口にクラウドの経路は無いので、画像はこのPCの外へ出ません。
 - `ask` の既定の待ち時間は 120 秒です。モデルの入れ替えが起きると、さらに 10 秒前後かかります。
 
@@ -84,3 +85,9 @@ $env:VLM_LLM_API_KEY_ENV = "LLH_TOKEN"         # 窓口にトークンを付け�
 | Step 4 `rag_local_bridge.py` の `local` | 偽の窓口でテスト(11 件)。**本物の窓口を通した `/query` は未確認**(RAG の索引が要る) |
 | Step 5 VLMAutoReplayTool | **本物の窓口・Unsloth で通し確認済み** |
 | Step 6 Hub | テスト 568 件通過。本物の窓口への死活監視を確認。**Hub の画面での表示・Start/Stop は未確認** |
+
+## 方針(2026-11-21 に決定)
+
+- **LocalLLM 側の資料(ドキュメントの出典)は、「ローカル内」と、DevelopmentRAGEnvironment の CloudflareRAG で行きます。** 窓口(LocalLLMHarness)自身は、資料の検索・取り込みを持ちません。資料の検索は RAG 側の仕事で、窓口は回答の生成だけを担当します。
+- **注意**: CloudflareRAG への質問・検索語は、**このPCの外(Cloudflare)へ出ます**。窓口の機密度の判定(`policy.toml`)は、窓口を通る入力だけが対象で、RAG 側から Cloudflare へ出る分は守りません。「外に出さない」区分(`.env`・`Portfolio`・Enterprises・未公開のリポジトリの中身)の質問は、**ローカルの RAG(`RAG_LLM_BACKEND=local` と、ローカルの検索)だけ**で処理してください。
+- Houdini のパネルへの `local` の追加と、Enterprises 配下のコピーの変更は、しません。

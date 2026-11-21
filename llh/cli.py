@@ -170,6 +170,47 @@ def cmd_smoke(args) -> int:
     return 1 if bad else 0
 
 
+def cmd_bench(args) -> int:
+    """入力の長さごとの速度(TTFT・入力の処理速度・生成速度)。Phase 0 の実測用。"""
+    from .bench import run_bench
+
+    h = _harness(args)
+    try:
+        sizes = [int(x) for x in args.sizes.split(",") if x.strip()]
+    except ValueError:
+        _out("--sizes は、カンマ区切りの整数(トークン数)にしてください。例: 512,2048,4096")
+        return 1
+    if args.role not in h.cfg.models:
+        _out(f"[{args.role}] config に無いロールです({', '.join(h.cfg.models)})")
+        return 1
+    _out(f"[{args.role}] {h.cfg.models[args.role].name}  出力は最大 {args.out_tokens} トークン。入力の長さごとに測ります…")
+    try:
+        rows = run_bench(h, args.role, sizes, out_tokens=args.out_tokens, warmup=not args.no_warmup)
+    except HarnessError as e:
+        _out(f"NG ({e.status} {e.code}): {e.message}")
+        return 2
+
+    def f(v, spec):
+        return "-" if v is None else format(v, spec)
+
+    _out(f"{'狙い':>6} {'入力':>6} {'出力':>5} {'TTFT(s)':>8} {'入力処理 tok/s':>14} {'生成 tok/s':>10} {'合計(s)':>8}")
+    bad = 0
+    for r in rows:
+        if r.error:
+            bad += 1
+            _out(f"{r.target:>6}  測れません: {r.error}")
+            continue
+        _out(f"{r.target:>6} {f(r.prompt_tokens, 'd'):>6} {f(r.completion_tokens, 'd'):>5} {f(r.ttft_s, '.2f'):>8} "
+             f"{f(r.prefill_tps, '.0f'):>14} {f(r.decode_tps, '.1f'):>10} {f(r.total_s, '.2f'):>8}")
+    if any(r.tokens_from == "chunks" for r in rows):
+        _out("注: 裏側が usage を返さないので、出力のトークン数は受け取ったチャンクの数(目安)です。入力処理の速度は出せません。")
+    g = status_mod.gpu_status()
+    if g:
+        _out(f"GPU: 使用 {g.used_mib} / {g.total_mib} MiB(空き {g.free_mib} MiB)")
+    _out("設計書 Phase 0 の仮の基準: 出力 10 tok/s 以上、8K の入力処理が数十秒以内。")
+    return 1 if bad == len(rows) else 0
+
+
 def cmd_route(args) -> int:
     h = _harness(args)
     text = sys.stdin.read() if args.text == "-" else args.text
@@ -290,6 +331,13 @@ def build_parser() -> argparse.ArgumentParser:
     s.add_argument("--long", action="store_true", help="長めに出力させて、生成速度(tok/s)を測る")
     s.add_argument("--image", help="画像ファイル(png/jpg/webp/gif)を付けて質問する。vision の確認用")
     s.set_defaults(func=cmd_smoke)
+
+    s = sub.add_parser("bench", help="入力の長さごとの速度(TTFT・入力処理・生成速度)を測る")
+    s.add_argument("--role", default="main", help="main / vision / writer")
+    s.add_argument("--sizes", default="512,2048,4096,6000", help="狙う入力のトークン数(カンマ区切り)。文脈の上限を超える長さは測らない")
+    s.add_argument("--out-tokens", type=int, default=64, help="出力の最大トークン数(既定 64)")
+    s.add_argument("--no-warmup", action="store_true", help="最初の捨て測定をしない")
+    s.set_defaults(func=cmd_bench)
 
     s = sub.add_parser("route", help="送らずに、行き先・モデル・機密度だけを表示する")
     s.add_argument("text", help="質問の文('-' で標準入力)")

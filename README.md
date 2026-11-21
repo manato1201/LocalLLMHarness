@@ -59,6 +59,7 @@ uv run llh policy-check C:\path\to\file               # 外に出せるか(0=出
 uv run llh diff-summary --repo . [--staged]           # 差分の要約 + コミットメッセージ案(コミットはしない)
 uv run llh mermaid "ユーザー→窓口→Unsloth の流れ" --out docs\flow.mmd
 uv run llh audit-verify                               # 監査ログの連鎖を確かめる
+uv run llh bench --role main --sizes 512,2048,4096,6000   # 入力の長さごとの速度(TTFT・入力処理・生成)
 ```
 
 呼び出し側(Python などの OpenAI クライアント)は、`base_url="http://127.0.0.1:8800/v1"`、`model="llh-main"`(または `auto`)にします。追加の指定は、リクエストの本体の `llh` で:
