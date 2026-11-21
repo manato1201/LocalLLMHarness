@@ -97,8 +97,13 @@ def cmd_smoke(args) -> int:
             _out(f"[{role}] config に無いロールです")
             bad += 1
             continue
-        body = {"model": spec.alias, "temperature": 0, "max_tokens": 32,
-                "messages": [{"role": "user", "content": "1+1 は? 数字だけで答えて。"}]}
+        if args.long:
+            # 速度の測定用: 長めに出力させる(1 トークンだけでは、準備時間が大半で、tok/s にならない)
+            prompt, max_tok = "ローカルLLMを使う利点を、日本語で 6 つ挙げ、それぞれ 2 文で説明してください。", 256
+        else:
+            prompt, max_tok = "1+1 は? 数字だけで答えて。", 32
+        body = {"model": spec.alias, "temperature": 0, "max_tokens": max_tok,
+                "messages": [{"role": "user", "content": prompt}]}
         t0 = time.monotonic()
         try:
             res = h.chat(body)
@@ -111,8 +116,12 @@ def cmd_smoke(args) -> int:
             reply = (res.body["choices"][0]["message"].get("content") or "").strip()
             usage = res.body.get("usage") or {}
             ct = usage.get("completion_tokens")
-            speed = f"{ct / dt:.1f} tok/s(待ち時間込み)" if ct and dt > 0 else "tok/s 不明"
-            _out(f"[{role}] {spec.name}: OK {dt:.1f}s  {speed}  応答: {reply[:40]!r}")
+            note = "(待ち時間込み)" if args.long else "(出力が短いので目安にならない。--long で測る)"
+            speed = f"{ct / dt:.1f} tok/s{note}" if ct and dt > 0 else "tok/s 不明"
+            _out(f"[{role}] {spec.name}: OK {dt:.1f}s  出力 {ct} トークン  {speed}  応答: {reply[:40]!r}")
+            gpu = status_mod.gpu_status()
+            if gpu:
+                _out(f"    GPU: 使用 {gpu.used_mib} / {gpu.total_mib} MiB(空き {gpu.free_mib} MiB)")
             if "X-LLH-Warning" in res.headers:
                 _out(f"    注意: {unquote(res.headers['X-LLH-Warning'])}")
         finally:
@@ -237,6 +246,7 @@ def build_parser() -> argparse.ArgumentParser:
 
     s = sub.add_parser("smoke", help="ロールごとに短い質問を送り、単体動作と速さを確認する")
     s.add_argument("--role", default="main", help="main / vision / writer / all(既定 main)。1 度に 1 モデルしか載らないので、手で読み込んでから")
+    s.add_argument("--long", action="store_true", help="長めに出力させて、生成速度(tok/s)を測る")
     s.set_defaults(func=cmd_smoke)
 
     s = sub.add_parser("route", help="送らずに、行き先・モデル・機密度だけを表示する")

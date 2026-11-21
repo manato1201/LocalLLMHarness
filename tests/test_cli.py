@@ -145,3 +145,12 @@ def test_load_cli(cfg_file, backend, capsys):
     backend.load_status = 500
     backend.loaded[:] = [WRITER]
     assert run(cfg_file, "load", "--role", "main") == 2
+
+
+@pytest.mark.parametrize("bad", ["sk-unsloth-…", "sk-unsloth-日本語", " sk-abc ", "sk-abc\n"])
+def test_invalid_api_key_gives_readable_error(cfg_file, monkeypatch, capsys, bad):
+    monkeypatch.setenv("LLH_BACKEND_API_KEY", bad)
+    assert run(cfg_file, "models") == 2  # トレースバックでなく、メッセージ
+    out = capsys.readouterr().out
+    assert "LLH_BACKEND_API_KEY" in out and "不正" in out
+    assert "SECRETMARK" not in out  # キーの中身は出さない

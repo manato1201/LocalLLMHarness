@@ -43,6 +43,14 @@ class Backend:
             h["Content-Type"] = "application/json"
         key = self.cfg.backend_api_key
         if key:
+            # HTTP ヘッダーに入れられない文字(説明文の「…」を、そのまま入れた場合など)は、トレースバックでなく
+            # 原因が分かるエラーにする。キーの中身は、メッセージに出さない。
+            if not (key.isascii() and key.isprintable() and key == key.strip()):
+                raise BackendError(
+                    500,
+                    f"環境変数 {self.cfg.backend_api_key_env} の値が不正です(英数字と記号だけ、前後に空白なし)。"
+                    "説明文の「sk-unsloth-…」を、そのまま入れていませんか? Unsloth の Settings > API で作った、本物のキーを入れてください",
+                )
             h["Authorization"] = f"Bearer {key}"
         return h
 
