@@ -1,0 +1,120 @@
+"""推論の裏側(B1: Unsloth Desktop)への接続。OpenAI 互換 API。標準ライブラリだけ。
+
+使うのは `/models` と `/chat/completions` だけ。サーバー側ツール(`enable_tools`)は、窓口が外す(core.py)。
+"""
+from __future__ import annotations
+
+import http.client
+import json
+import time
+from collections.abc import Iterator
+from urllib.parse import urlsplit
+
+from .config import Config
+
+
+class BackendError(Exception):
+    def __init__(self, status: int, message: str):
+        super().__init__(message)
+        self.status = status
+        self.message = message
+
+
+class Backend:
+    def __init__(self, cfg: Config):
+        self.cfg = cfg
+        u = urlsplit(cfg.backend_base_url)
+        if u.scheme not in ("http", "https") or not u.hostname:
+            raise BackendError(500, f"backend.base_url が不正です: {cfg.backend_base_url}")
+        self._https = u.scheme == "https"
+        self._host = u.hostname
+        self._port = u.port or (443 if self._https else 80)
+        self._prefix = u.path.rstrip("/")
+        self._models_cache: tuple[float, list[dict]] | None = None
+
+    # ── 下請け ────────────────────────────────────────────
+    def _conn(self) -> http.client.HTTPConnection:
+        cls = http.client.HTTPSConnection if self._https else http.client.HTTPConnection
+        return cls(self._host, self._port, timeout=self.cfg.backend_timeout_s)
+
+    def _headers(self, json_body: bool) -> dict[str, str]:
+        h = {"Accept": "application/json"}
+        if json_body:
+            h["Content-Type"] = "application/json"
+        key = self.cfg.backend_api_key
+        if key:
+            h["Authorization"] = f"Bearer {key}"
+        return h
+
+    def _request(self, method: str, path: str, body: dict | None = None) -> tuple[http.client.HTTPConnection, http.client.HTTPResponse]:
+        conn = self._conn()
+        payload = json.dumps(body, ensure_ascii=False).encode("utf-8") if body is not None else None
+        try:
+            conn.request(method, self._prefix + path, body=payload, headers=self._headers(body is not None))
+            return conn, conn.getresponse()
+        except (OSError, http.client.HTTPException) as e:
+            conn.close()
+            raise BackendError(502, f"推論の裏側({self.cfg.backend_base_url})に接続できません: {e}") from e
+
+    @staticmethod
+    def _error_message(status: int, raw: bytes) -> str:
+        try:
+            err = json.loads(raw).get("error")
+            if isinstance(err, dict):
+                err = err.get("message")
+            if err:
+                return str(err)[:500]
+        except (ValueError, AttributeError):
+            pass
+        return f"推論の裏側がエラーを返しました(HTTP {status})"
+
+    # ── 公開 ──────────────────────────────────────────────
+    def list_models(self, cache_s: float = 0.0) -> list[dict]:
+        now = time.monotonic()
+        if cache_s and self._models_cache and now - self._models_cache[0] < cache_s:
+            return self._models_cache[1]
+        conn, resp = self._request("GET", "/models")
+        try:
+            raw = resp.read()
+            if resp.status != 200:
+                raise BackendError(502, self._error_message(resp.status, raw))
+            data = json.loads(raw).get("data", [])
+        except ValueError as e:
+            raise BackendError(502, "推論の裏側の /models の応答が JSON ではありません") from e
+        finally:
+            conn.close()
+        self._models_cache = (now, data)
+        return data
+
+    def chat(self, body: dict) -> dict:
+        conn, resp = self._request("POST", "/chat/completions", body)
+        try:
+            raw = resp.read()
+            if resp.status != 200:
+                raise BackendError(resp.status if 400 <= resp.status < 600 else 502, self._error_message(resp.status, raw))
+            try:
+                return json.loads(raw)
+            except ValueError as e:
+                raise BackendError(502, "推論の裏側の応答が JSON ではありません") from e
+        finally:
+            conn.close()
+
+    def chat_stream(self, body: dict) -> Iterator[bytes]:
+        """SSE の行を、そのまま(改行つきで)流す。最後に接続を閉じる。"""
+        conn, resp = self._request("POST", "/chat/completions", body)
+        if resp.status != 200:
+            raw = resp.read()
+            conn.close()
+            raise BackendError(resp.status if 400 <= resp.status < 600 else 502, self._error_message(resp.status, raw))
+
+        def gen() -> Iterator[bytes]:
+            try:
+                while True:
+                    line = resp.readline()
+                    if not line:
+                        return
+                    yield line
+            finally:
+                conn.close()
+
+        return gen()

@@ -1,0 +1,23 @@
+[project]
+name = "llh"
+version = "0.1.0"
+description = "LocalLLMHarness: ローカルLLM(Unsloth Desktop)の前に置く窓口。機密度の判定・モデルの振り分け・監査ログ"
+readme = "README.md"
+requires-python = ">=3.11"
+dependencies = []  # 標準ライブラリだけで動く(LiteLLM などの既製品は使わない。設計書 §2)
+
+[project.scripts]
+llh = "llh.cli:main"
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["llh"]
+
+[dependency-groups]
+dev = ["pytest>=8"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]

@@ -3,3 +3,13 @@
 .env
 .env.*
 !.env.example
+
+# 実行時の生成物・自分用の設定(個人のパスを含むため、example だけを版管理する)
+config.toml
+policy.toml
+logs/
+__pycache__/
+*.pyc
+.venv/
+.pytest_cache/
+*.egg-info/

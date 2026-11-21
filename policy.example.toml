@@ -1,0 +1,52 @@
+# 機密度の判定(設計書 軸 1)。`policy.toml` にコピーして使う(policy.toml は .gitignore 済み)。
+# どれか 1 つでも該当すれば「外に出さない」。判定はサーバー(窓口)側で行い、利用者は回避できない。
+# このファイルの変更は管理者だけが行う。窓口は起動時に読み込み、ファイルのハッシュを監査ログに残す。
+
+[paths]
+# ① パスの規則。**既定は拒否**: allow に無いパスは「外に出さない」。deny は allow より優先。
+# ワイルドカード: `*` は 1 階層、`**` は階層をまたぐ。大文字小文字は区別しない。
+allow = [
+  "C:/Users/*/Desktop/GameDevelopment/**",
+]
+deny = [
+  "**/.env",
+  "**/.env.*",
+  "**/*.pem",
+  "**/*.key",
+  "**/id_rsa*",
+  "**/Portfolio/**",
+  "**/Enterprises/**",
+  "**/.ssh/**",
+  "**/.claude/settings.local.json",
+]
+
+[content]
+# ② 内容の検査。組み込みの検出器から使うものを選ぶ。
+#   openai_key   sk-… 形式(sk-unsloth-、sk-ant- を含む)
+#   aws_key      AKIA… 形式
+#   github_token ghp_ / github_pat_ …
+#   google_key   AIza…
+#   slack_token  xox?-…
+#   private_key  -----BEGIN … PRIVATE KEY-----
+#   jwt          eyJ….eyJ….…
+#   secret_assignment  api_key= / password: などに続く長い値
+#   email        メールアドレス
+#   personal_path  C:\Users\<名前> / /home/<名前> / /Users/<名前>
+detectors = [
+  "openai_key", "aws_key", "github_token", "google_key", "slack_token",
+  "private_key", "jwt", "secret_assignment", "email", "personal_path",
+]
+
+# 追加の正規表現(社内の識別子など)。name は監査ログに出る。一致した文字列は、どこにも残さない。
+extra = [
+  # { name = "project_codename", regex = "(?i)codename-[a-z]+" },
+]
+
+# 本物のキーに通じない「おとりキー」。見つかったら即「外に出さない」(漏れの検知用)。
+decoys = [
+  "sk-decoy-00000000000000000000",
+]
+
+[manual]
+# ③ 手動の指定。リクエストの本体の `llh.local_only = true`、またはヘッダー `X-LLH-Local-Only: 1` で強制できる。
+header = "X-LLH-Local-Only"

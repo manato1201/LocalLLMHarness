@@ -1,0 +1,56 @@
+# LocalLLMHarness の設定。`config.toml` にコピーして使う(config.toml は .gitignore 済み)。
+# 秘密(API キー・窓口のトークン)はここに書かず、環境変数で渡す。
+
+[server]
+host = "127.0.0.1"          # 127.0.0.1 / localhost / ::1 以外では起動しない(設計書 S13)
+port = 8800                 # 窓口のポート。Unsloth(8888 / 8000)と重ねない
+token_env = "LLH_TOKEN"     # この環境変数に値があれば、Authorization: Bearer <値> を要求する
+
+[backend]
+# 推論の裏側(B1: Unsloth Desktop)。Settings > API で作ったキーは、環境変数 LLH_BACKEND_API_KEY に。
+base_url = "http://127.0.0.1:8888/v1"
+api_key_env = "LLH_BACKEND_API_KEY"
+timeout_s = 300
+# 読み込み済みでないモデルへ送ろうとしたとき: "off"=確認しない / "warn"=応答ヘッダーで知らせる / "error"=409 で止める
+# Unsloth は API からモデルを切り替えられない(設計書 §1.1)ので、手で読み込む必要がある。
+on_model_mismatch = "warn"
+
+# モデルの役割(ロール)。name は Unsloth の `GET /v1/models` に出る id に合わせる(`llh models` で確認)。
+# VRAM 8GB なので、同時ロードはしない。窓口は 1 度に 1 リクエストだけ通す(直列化)。
+[models.main]
+alias = "llh-main"
+name = "unsloth/Qwen3.5-9B-GGUF:Q4_K_M"       # 仮の名前。実機の id に直す
+purpose = "コード・JSON・Mermaid・git diff の要約・ログの切り分け・RAG の回答"
+tasks = ["code", "json", "mermaid", "diff", "log", "rag"]
+
+[models.vision]
+alias = "llh-vision"
+name = "unsloth/Qwen2.5-VL-7B-Instruct-GGUF:Q4_K_M"   # 仮の名前
+purpose = "画面の状態認識・画像の差分説明(VLMAutoReplayTool の接続先)"
+tasks = ["vision", "screen"]
+
+[models.writer]
+alias = "llh-writer"
+name = "unsloth/gemma-4-9b-it-GGUF:Q4_K_M"    # 仮の名前
+purpose = "日本語の文書・長文ノートの要約と整理"
+tasks = ["doc", "summary", "note"]
+
+[limits]
+max_context_tokens = 8192    # 文脈の目安(4096〜8192)。これを超える入力は、モデルに送らず 400 で返す
+max_output_tokens = 2048     # max_tokens の上限(これを超える指定は切り詰める)
+default_max_tokens = 1024
+max_body_bytes = 16777216    # 画像(base64)を含むので 16MB まで
+queue_timeout_s = 120        # 前のリクエストの終了を待つ上限。超えたら 503
+
+[paths]
+policy = "policy.toml"       # 無ければ policy.example.toml を使う
+audit_log = "logs/audit.jsonl"
+
+[mode]
+# 「ローカルのみ」モード(設計書 S7)。true の間は、クラウドへ送る経路を持たない。
+# このバージョンの窓口にはクラウドへの経路が無いので、常に true。
+local_only = true
+
+[mermaid]
+# DocsPipeline の標準の行(`docspipeline check-mermaid --fix` が入れるもの)。空なら入れない。
+require_init_line = false
