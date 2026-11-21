@@ -1,14 +1,30 @@
 # 他のツールとの接続(導入チェックリスト Step 4〜6)
 
-この文書は、**他のリポジトリを書き換えずに**、窓口(`http://127.0.0.1:8800/v1`)へつなぐ手順と、差し込むコードの案です。
-適用は、各リポジトリの持ち主(自分)が確認してから行ってください。どれも**未適用・未検証**です(本物の Unsloth が未導入のため)。
-
-前提: `llh serve` が動いていて、`llh status` で、使うモデルが「●読み込み済み」になっていること。
-窓口にトークンを付けた場合(`LLH_TOKEN`)は、呼び出し側の API キーに同じ値を入れます。付けない場合、API キーは何でも構いません(窓口は見ません)。
+窓口(`http://127.0.0.1:8800/v1`)に、他のツールをつなぐ手順です。**2026-11-21 に Step 4〜6 を適用・確認しました**(下の「確認の範囲」)。
+窓口にトークンを付けた場合(`LLH_TOKEN`)は、呼び出し側にも同じ値を渡します。付けなければ、API キーは何でも構いません(窓口は見ません)。
 
 ## 1. Step 4: DevelopmentRAGEnvironment
 
-### 1-a. `local-chat`(すぐ使える)
+### 1-a. `scripts/rag_local_bridge.py`(適用済み)
+
+`RAG_LLM_BACKEND=local`(または `POST /api/llm-backend {"backend": "local"}`)で、回答の生成を窓口に切り替えます。資料の抜粋は、このPCの外へ出ません。
+
+| 環境変数 | 既定 | 意味 |
+|---|---|---|
+| `RAG_LLM_BACKEND` | `claude` | `claude` / `gemini` / `local` |
+| `RAG_LOCAL_LLM_URL` | `http://127.0.0.1:8800/v1` | 窓口。**loopback の http だけ**(それ以外は、送る前に断る) |
+| `RAG_LOCAL_LLM_MODEL` | `llh-main` | 窓口のモデルの別名 |
+| `RAG_LOCAL_CONTEXT_CHARS` | `12000` | 資料に使う文字数の上限。超えたら、後ろの資料から落とす(ローカルの文脈は 8K トークン前後) |
+| `LLH_TOKEN` | なし | 窓口にトークンを付けたときだけ |
+
+- 既定は `claude` のままです(動作を変えていません)。`local` のときは `ANTHROPIC_API_KEY` が要りません。
+- 利用者の権限(namespace)の絞り込みは、バックエンドによらず同じです(権限の無い資料は、ローカルのモデルにも渡しません)。テストで確認しています。
+- 窓口が止まっているときは、「`uv run llh serve` を起動してください」と出ます(500)。
+- **Houdini のパネル(`rag_chatbot.py`)の切り替え欄は、まだ `claude` / `gemini` だけです。**`local` を選ぶには、環境変数か `/api/llm-backend` を使います。
+- 変更: `scripts/rag_local_bridge.py`、テスト `houdini/tests/test_local_backend.py`(11 件)。
+- **`Enterprises/AXTechCare/RAGEnvironment/scripts/rag_local_bridge.py` は、触っていません**(同名の別コピー)。「外に出さない」区分(Enterprises 配下)に当たるので、`local` を既定にすることを検討してください。
+
+### 1-b. `local-chat`
 
 `local-chat/config.json`:
 
@@ -16,93 +32,37 @@
 { "llm": { "base_url": "http://127.0.0.1:8800/v1", "model": "llh-main", "api_key": "" } }
 ```
 
-`local-chat` は Unsloth のサーバー側ツールを要求しない作りで、窓口もそれを外すので整合します。
+(未確認。`local-chat` を窓口につなぐ試験は、していません。)
 
-### 1-b. `scripts/rag_local_bridge.py`(コードの変更が要る)
+## 2. Step 5: VLMAutoReplayTool(コードの変更なし・確認済み)
 
-確認した現状(2026-11-21): LLM の選択肢は `_LLM_BACKEND = "claude" | "gemini"` の 2 つだけで、**ローカルの OpenAI 互換につなぐ道が無い**(`/api/llm-backend` も 2 つだけ許す)。
-つまり設計書の「接続先をローカルAPIへ変更」は、設定の書き換えでは済まず、**`local` の選択肢を足す**必要があります。差し込み案:
-
-```python
-# ─── ローカル LLM(LocalLLMHarness の窓口)呼び出し ───────────────────────────
-LOCAL_LLM_URL = os.environ.get("RAG_LOCAL_LLM_URL", "http://127.0.0.1:8800/v1")
-
-
-def _call_local(context_texts: list[str], query: str, history: list[dict]) -> str:
-    """_call_claude と同じ形で、窓口(OpenAI 互換)へ。参考資料は外へ出ない。"""
-    context = "\n\n".join(context_texts) if context_texts else "（参考ドキュメントなし）"
-    messages: list[dict] = [{"role": "system", "content": SYSTEM_PROMPT}]
-    messages.append({"role": "user", "content": f"以下の参考ドキュメントを確認しました。\n\n{context}"})
-    messages.append({"role": "assistant", "content": "参考ドキュメントを確認しました。ご質問にお答えします。"})
-    for h in history[-6:]:
-        role = "assistant" if h.get("role") in ("bot", "assistant") else "user"
-        text = h.get("text", h.get("content", ""))
-        if text:
-            messages.append({"role": role, "content": text})
-    messages.append({"role": "user", "content": query})
-
-    payload = json.dumps({
-        "model": "llh-main", "messages": messages, "temperature": 0.3, "max_tokens": 1024,
-        "llh": {"task": "rag"},          # 窓口が、機密度の判定と記録をする
-    }, ensure_ascii=False).encode("utf-8")
-    headers = {"Content-Type": "application/json"}
-    if os.environ.get("LLH_TOKEN"):
-        headers["Authorization"] = f"Bearer {os.environ['LLH_TOKEN']}"
-    req = urllib.request.Request(f"{LOCAL_LLM_URL}/chat/completions", data=payload, headers=headers, method="POST")
-    with urllib.request.urlopen(req, timeout=300) as resp:   # 9B のローカル推論は遅い。Claude の 30 秒では足りない
-        return json.loads(resp.read())["choices"][0]["message"]["content"]
-```
-
-あわせて、変更が要る 3 か所:
-
-1. `_LLM_BACKEND` の説明コメントに `"local"` を足す(`RAG_LLM_BACKEND=local` で既定にできる)。
-2. `POST /api/llm-backend` の許可リスト `("claude", "gemini")` に `"local"` を足す。
-3. `/query` の分岐(`if _LLM_BACKEND == "gemini": … else: _call_claude`)に `elif _LLM_BACKEND == "local": answer = _call_local(...)`。
-
-注意: `Enterprises/AXTechCare/RAGEnvironment/scripts/rag_local_bridge.py` に**同名の別コピー**があります。設計書の「外に出さない」区分(Enterprises 配下)に当たるので、そちらは**ローカル(`local`)を既定にする**ことを検討してください。
-
-## 2. Step 5: VLMAutoReplayTool
-
-`vlm_auto_replay.prompts.openai_compat_client` は、loopback の http か https だけを許す作りなので、窓口(127.0.0.1)にそのままつながります。コードの変更は要りません。環境変数だけ:
+`vlm_auto_replay.prompts.openai_compat_client` は、loopback の http か https だけを許す作りなので、窓口にそのままつながります。環境変数だけ:
 
 ```powershell
 $env:VLM_LLM_BASE_URL    = "http://127.0.0.1:8800/v1"
-$env:VLM_LLM_MODEL       = "llh-vision"        # 画像が付いていれば、モデル名を省いても vision に振り分けられる
+$env:VLM_LLM_MODEL       = "llh-vision"
 $env:VLM_LLM_API_KEY_ENV = "LLH_TOKEN"         # 窓口にトークンを付けたときだけ(キーの「値」でなく、環境変数の「名前」)
 ```
 
-- 先に、Unsloth Desktop で **Qwen2.5-VL (7B)** を読み込みます(他のモデルは、アンロードされます)。
-- 画像は `image_url`(data URI)で来るので、窓口は**画像のデータを機密度の検査に使わず**(文字だけ検査)、`llh-vision` へ振り分けます。画面キャプチャに写った秘密は、この検査では見つけられません。**機密の画面は、窓口の外(クラウド)へ出さない運用で守ってください**(窓口にクラウドの経路は無い)。
-- 疎通確認: `uv run python -m vlm_auto_replay.ask --base-url http://127.0.0.1:8800/v1 …`(引数は `ask.py` の `--help` で確認)。
+通しの確認(2026-11-21): `python -m vlm_auto_replay.ask --image <画面のキャプチャ> "この画面の状態を、1 文で説明して"` が、窓口 → Qwen3.5-9B で、画面の内容を正しく説明しました(監査ログ: `role: vision`・`status: 200`・約 34 秒)。
 
-## 3. Step 6: ToolOrchestrationHub への登録
+- **遅さに注意**: 4K 級の画面全体の画像は、入力が約 2000 トークンになり、約 34 秒かかります。自動操作で何度も呼ぶなら、**画像を縮小して**(幅 1280px 程度)から渡してください。
+- 画像は `image_url`(data URI)で来るので、窓口は**画像のデータを機密度の検査に使いません**(文字だけ検査)。画面キャプチャに写った秘密は、この検査では見つけられません。窓口にクラウドの経路は無いので、画像はこのPCの外へ出ません。
+- `ask` の既定の待ち時間は 120 秒です。モデルの入れ替えが起きると、さらに 10 秒前後かかります。
 
-`ToolOrchestrationHub/hub/registry.yaml` の `tools:` に足す案(ホットリロードされます。壊れた台帳は拒否され、古いまま動きます):
+## 3. Step 6: ToolOrchestrationHub(適用済み)
 
-```yaml
-  - tool_id: local_llm_harness
-    display_name: "LocalLLMHarness"
-    symbol: "Lh"
-    color: "#40636d"
-    transport: http_bridge
-    endpoint: "http://127.0.0.1:8800/health"
-    health_check: http_bridge_check
-    category: monitored
-    isolation: none
-    description: "ローカルLLM(Unsloth Desktop)の窓口。機密度の判定・モデルの振り分け・監査ログ。"
-    owner_rules:
-      - "窓口は 1 度に 1 リクエストだけ通す(VRAM 8GB)。同じ GPU の重い作業(Houdini の ML 学習など)と同時に動かさない"
-      - "Hub が叩くのは未認証の /health だけ(トークンを付けた場合は、/health にも要る点に注意)"
-    poll_interval_s: 30
-    check_params:
-      timeout_s: 3.0
-```
+- `hub/registry.yaml` に `local_llm_harness`(13 件目)を追加: `http://127.0.0.1:8800/health` を 30 秒ごとに能動監視(`http_bridge_check`)。
+- `hub/repos.yaml` に `local_llm_harness`(14 件目)を追加: `git fetch` の対象と、`uv run llh serve` の起動コマンド。
+- 件数を固定しているテストと文書(12→13 ツール・13→14 リポジトリ)を更新しました。Hub のテストは 568 件すべて通ります。
+- 実際の窓口に対する死活監視で `is_up=True` を確認しました。
 
-- `symbol` / `color` は、他と重ならない値に直してください(台帳の規則は `registry.yaml` の冒頭)。
-- Step 4 を入れたあとは、`dev_rag_environment` の `depends_on` に `local_llm_harness` を足します(`depends_on` は「このツールが使っているツール」。障害の波及の表示に使われます)。
-- 窓口に `LLH_TOKEN` を付けると、`/health` も 401 になり、Hub の能動監視が通りません。Hub の監視を使うなら、トークンなし(127.0.0.1 だけの待ち受け)で運用するのが簡単です。
-- `GET /health` は、**裏側(Unsloth)が止まっていても 200** を返し、中身の `backend: "up" | "down"` で伝えます(窓口自体は生きているため)。Hub が HTTP の 200 だけで「正常」と見ると、Unsloth が止まっていても緑になります。**裏側の死活も見たい場合は、Hub 側の判定に `backend == "up"` の確認を足す**か、別に `http://127.0.0.1:8888/v1/models` を能動監視にしてください。
-- 起動・停止(`Start` / `Stop`)を Hub から行うなら、`hub/repos.yaml` 側に固定のコマンド(`uv run llh serve`)を登録します(Hub の「許可リストの固定コマンドだけ」の方針に合わせる)。
+注意点:
+
+- **窓口を止めている間は、「停止」になり、通知(トースト)が出ます。**使うときだけ起動する運用なら、通知が多くなります。常用しないなら、`category` を見直してください。
+- `/health` は、Unsloth が止まっていても 200 を返します(中身の `backend: "up" | "down"` で伝えます)。Hub は 200 だけを見るので、**Unsloth の死活は映りません**。
+- 窓口に `LLH_TOKEN` を付けると、`/health` も 401 になり、Hub の監視が通りません。Hub を使うなら、トークンなし(127.0.0.1 だけの待ち受け)で運用するのが簡単です。
+- Hub から窓口を起動する(`Start`)と、Hub の環境変数を引き継ぎます。`LLH_BACKEND_API_KEY` は `setx` で保存し、**Hub を再起動してから**使ってください。Unsloth Desktop は別に起動しておきます。
 - 定期実行(Windows タスクスケジューラ → 窓口)は、直接シェルを操作させず、窓口の API か `llh` の固定のサブコマンドだけを呼びます。例: 毎朝の差分要約
 
   ```powershell
@@ -113,6 +73,14 @@ $env:VLM_LLM_API_KEY_ENV = "LLH_TOKEN"         # 窓口にトークンを付け�
 
 ## 4. DocsPipeline との関係
 
-- `llh mermaid` の検査は、`mmdc` が PATH にあれば本物のパーサー(このPCには入っています)、無ければ簡易検査です。
+- `llh mermaid` の検査は、`mmdc` が PATH にあれば本物のパーサー、無ければ簡易検査です。
 - DocsPipeline の標準の `%%{init}%%` の行を入れたいときは、`config.toml` の `[mermaid] require_init_line = true`(DocsPipeline が import できる環境で動かす)。
 - **生成した図を文書に入れたあとは、必ず `docspipeline check-mermaid <文書>` と `docspipeline build` を通してください**(設計書 §4)。`llh mermaid` の合格は、その代わりにはなりません。
+
+## 確認の範囲(2026-11-21)
+
+| 項目 | 状態 |
+|---|---|
+| Step 4 `rag_local_bridge.py` の `local` | 偽の窓口でテスト(11 件)。**本物の窓口を通した `/query` は未確認**(RAG の索引が要る) |
+| Step 5 VLMAutoReplayTool | **本物の窓口・Unsloth で通し確認済み** |
+| Step 6 Hub | テスト 568 件通過。本物の窓口への死活監視を確認。**Hub の画面での表示・Start/Stop は未確認** |

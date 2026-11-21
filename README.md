@@ -72,23 +72,24 @@ uv run llh audit-verify                               # 監査ログの連鎖を
 
 ## 他のツールとの接続
 
-導入チェックリストの Step 4〜6(`rag_local_bridge.py`・`VLMAutoReplayTool`・`ToolOrchestrationHub`)の手順と差し込むコードは [docs/INTEGRATION.md](docs/INTEGRATION.md)。**他のリポジトリは、まだ変更していません。**
+導入チェックリストの Step 4〜6(`rag_local_bridge.py`・`VLMAutoReplayTool`・`ToolOrchestrationHub`)の手順と、確認の範囲は [docs/INTEGRATION.md](docs/INTEGRATION.md)。`DevelopmentRAGEnvironment` と `ToolOrchestrationHub` には、2026-11-21 に変更を加えました(それぞれのリポジトリでコミットします)。
 
 ## 進み具合(2026-11-21 時点)
 
 | 導入チェックリスト | 状態 |
 |---|---|
-| Step 1 Unsloth Desktop の導入・API の有効化 | **未**(このPCに未導入。手作業) |
-| Step 2・3 モデルの導入と単体確認 | **未**(導入後に `llh models` → `llh smoke --role all`) |
-| 窓口・機密度の判定・振り分け・監査ログ・CLI(この repo) | **実装済み**。テストは**偽の Unsloth**で通し(`uv run pytest -q`)。**本物の Unsloth との接続は未確認** |
-| Step 4 `rag_local_bridge.py` を窓口へ | **未**(今は `claude` / `gemini` だけで、ローカルの選択肢が無い。[INTEGRATION.md](docs/INTEGRATION.md) §1) |
-| Step 5 `VLMAutoReplayTool` を窓口へ | 環境変数だけで可能(§2)。**疎通は未確認** |
-| Step 6 `ToolOrchestrationHub` への登録 | 台帳の差し込み例あり(§3)。**未登録** |
+| Step 1 Unsloth Desktop の導入・API の有効化 | **済**(0.1.922-beta。API キーを作成) |
+| Step 2・3 モデルの導入と単体確認 | **済**。main(Qwen3.5-9B Q4_K_M)53 tok/s、writer(Gemma 4 E4B UD-Q4_K_XL)107 tok/s。vision は main と同じモデルで画像を読めた(Qwen2.5-VL は未導入)。Gemma 4 に 9B は無く、E4B を使用 |
+| 窓口・機密度の判定・振り分け・監査ログ・CLI(この repo) | **実装済み**。テストは偽の Unsloth で通し(`uv run pytest -q`)、`llh load` / `smoke` / `serve` と窓口経由の質問は**本物の Unsloth で確認済み** |
+| Step 4 `rag_local_bridge.py` を窓口へ | **適用済み**(`RAG_LLM_BACKEND=local`。偽の窓口でテスト 11 件。本物の窓口を通した `/query` は未確認。[INTEGRATION.md](docs/INTEGRATION.md) §1) |
+| Step 5 `VLMAutoReplayTool` を窓口へ | **確認済み**(環境変数だけ。画面の説明が窓口 → Qwen3.5 で通る。§2) |
+| Step 6 `ToolOrchestrationHub` への登録 | **登録済み**(台帳 13 件目・リポジトリ 14 件目。死活監視を確認。Hub の画面と Start/Stop は未確認。§3) |
 
 ### まだ無いもの(正直に)
 
 - **クラウドへの経路**: 窓口はローカルの裏側にしか送りません(「ローカルのみ」モード=常時 ON)。機密度の判定は**記録と表示**に使われ、振り分けのエスカレーション(Claude への回し)は未実装です。経路を足すときは、必ず `Policy.check_egress` を通します。
-- **Phase 0 の実測**(tok/s・VRAM・読み込み時間・B1/B2 の比較)・**評価セット `evals/`**・ツール呼び出しの正答率: 未着手。`llh smoke` は動作確認と、待ち時間込みの目安だけです。
+- **Phase 0 の実測**: 一部だけ。生成速度(main 53 / writer 107 tok/s)とモデルの入れ替え(約 9 秒)は測りました。文脈 8K/16K/32K での変化・B1/B2 の比較・ツール呼び出しの正答率は未着手です。**評価セット `evals/`** も未着手です。
+- **VRAM は余裕がありません**: main の読み込み中で空き約 0.8GB(他のプロセスの分を含む)。画像付きの質問(約 2000 トークン、約 34 秒)は重いので、画像は縮小してください。
 - **利用者ごとのトークン・管理者/デバッグの画面分け**(設計書「機能の範囲」): 未実装。今は単一の任意トークンだけ。
 - **優先度つきの順番待ち**: 直列化(先着順)だけ。
 - **トークン数の見積もり**は「3 文字 ≒ 1 トークン」の目安で、厳密ではありません。
