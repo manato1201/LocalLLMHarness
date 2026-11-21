@@ -86,6 +86,25 @@ def cmd_status(args) -> int:
     return 0 if s["backend"] == "up" else 2
 
 
+_IMAGE_MIME = {".png": "image/png", ".jpg": "image/jpeg", ".jpeg": "image/jpeg", ".webp": "image/webp", ".gif": "image/gif"}
+_IMAGE_MAX_BYTES = 4 * 1024 * 1024  # 窓口の文脈の上限(8192 トークン)に対し、画像は 1 枚 約 1000 トークンの見積もり。大きすぎる画像は縮小してから
+
+
+def _image_content(path: str) -> list[dict]:
+    p = Path(path)
+    mime = _IMAGE_MIME.get(p.suffix.lower())
+    if mime is None:
+        raise ValueError(f"対応していない拡張子です({', '.join(_IMAGE_MIME)})")
+    data = p.read_bytes()
+    if len(data) > _IMAGE_MAX_BYTES:
+        raise ValueError(f"画像が大きすぎます({len(data) // 1024} KB。上限 {_IMAGE_MAX_BYTES // 1024} KB)。縮小してください")
+    import base64
+
+    url = f"data:{mime};base64,{base64.b64encode(data).decode('ascii')}"
+    return [{"type": "text", "text": "この画像に何が写っているか、日本語で 2〜3 文で説明してください。"},
+            {"type": "image_url", "image_url": {"url": url}}]
+
+
 def cmd_smoke(args) -> int:
     """単体動作の確認(導入チェックリスト Step 2・3)。ロールごとに 1 回だけ、短い質問を送って速さを測る。"""
     h = _harness(args)
@@ -102,8 +121,17 @@ def cmd_smoke(args) -> int:
             prompt, max_tok = "ローカルLLMを使う利点を、日本語で 6 つ挙げ、それぞれ 2 文で説明してください。", 256
         else:
             prompt, max_tok = "1+1 は? 数字だけで答えて。", 32
+        content: object = prompt
+        if args.image:
+            try:
+                content = _image_content(args.image)
+            except (OSError, ValueError) as e:
+                _out(f"[{role}] 画像を読めません: {e}")
+                bad += 1
+                continue
+            max_tok = max(max_tok, 200)
         body = {"model": spec.alias, "temperature": 0, "max_tokens": max_tok,
-                "messages": [{"role": "user", "content": prompt}]}
+                "messages": [{"role": "user", "content": content}]}
         try:
             if h.cfg.on_model_mismatch == "load":
                 # モデルの入れ替えは別に測る(生成速度に混ぜない)
@@ -260,6 +288,7 @@ def build_parser() -> argparse.ArgumentParser:
     s = sub.add_parser("smoke", help="ロールごとに短い質問を送り、単体動作と速さを確認する")
     s.add_argument("--role", default="main", help="main / vision / writer / all(既定 main)。1 度に 1 モデルしか載らないので、手で読み込んでから")
     s.add_argument("--long", action="store_true", help="長めに出力させて、生成速度(tok/s)を測る")
+    s.add_argument("--image", help="画像ファイル(png/jpg/webp/gif)を付けて質問する。vision の確認用")
     s.set_defaults(func=cmd_smoke)
 
     s = sub.add_parser("route", help="送らずに、行き先・モデル・機密度だけを表示する")

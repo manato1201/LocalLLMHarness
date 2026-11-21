@@ -169,3 +169,19 @@ def test_smoke_warns_on_empty_reply(cfg_file, backend, capsys):
     backend.reply = ""
     assert run(cfg_file, "smoke") == 0
     assert "本文が空" in capsys.readouterr().out
+
+
+def test_smoke_with_image_routes_as_image_message(cfg_file, backend, tmp_path, capsys):
+    img = tmp_path / "x.png"
+    img.write_bytes(b"\x89PNG\r\n\x1a\n" + b"0" * 64)
+    assert run(cfg_file, "smoke", "--role", "vision", "--image", str(img)) == 0
+    content = backend.requests[-1]["messages"][0]["content"]
+    assert content[1]["type"] == "image_url" and content[1]["image_url"]["url"].startswith("data:image/png;base64,")
+
+
+def test_smoke_image_errors(cfg_file, tmp_path, capsys):
+    assert run(cfg_file, "smoke", "--role", "vision", "--image", str(tmp_path / "none.png")) == 1
+    bad = tmp_path / "a.txt"
+    bad.write_text("x")
+    assert run(cfg_file, "smoke", "--role", "vision", "--image", str(bad)) == 1
+    assert "対応していない拡張子" in capsys.readouterr().out
