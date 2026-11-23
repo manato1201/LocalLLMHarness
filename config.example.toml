@@ -70,6 +70,24 @@ local_only = true
 # DocsPipeline の標準の行(`docspipeline check-mermaid --fix` が入れるもの)。空なら入れない。
 require_init_line = false
 
+[autostart]
+# `uv run llh autostart`(常駐): Unsloth Desktop が起動したら、窓口と、下のサービスを自動で起動する。
+# Unsloth の API のポート(backend.base_url)に、poll_s 秒ごとにつないでみて、つながったら「起動した」と見なす。
+# 起動するのは、窓口(必ず最初)と、下に書いたものだけ。コマンドは配列で書く(shell は通さない)。
+# ログオン時に自動で始めるには、`uv run llh autostart install`(Windows)。外すには `uv run llh autostart uninstall`。
+poll_s = 5                   # 見張る間隔(秒)。1 以上
+stop_with_unsloth = true     # Unsloth が見えなくなって 2 回続いたら、自分で起動したものだけを止める
+# load_role = "main"         # 起動のあと、このロールのモデルを読み込む(既定は読み込まない。VRAM を使うため)
+# lock_port = 8897           # 二重起動を防ぐための、127.0.0.1 のポート
+
+# [[autostart.service]]      # 例: ChapterLens のエンジン(題名付けを有効にして起動)。cwd は、この設定ファイルからの相対でもよい
+# name = "chapterlens"
+# cwd = "../ChapterLens/engine"
+# command = ["uv", "run", "python", "-m", "chapterlens", "serve", "--allow-origin", "chrome-extension://egcgicajchobpecnggcblcbnoadlnfai"]
+# pre = [["uv", "run", "python", "-m", "chapterlens", "admin", "llm", "on"]]   # 起動の前に 1 回ずつ。失敗しても、起動は続ける
+# port = 8787                # 起動したかを見るポート(すでに待ち受けていれば、起動も停止もしない)
+# wait_s = 60                # ポートが開くのを待つ上限(秒)
+
 [training]
 # Phase 6(微調整の準備。docs/PHASE6.md)。true にすると、検証に通った生成(A1)を logs/verified.jsonl に保存する。
 # **質問と回答の全文を含む**ので、ローカルのみ。「外に出さない」区分は保存しない。既定は保存しない。

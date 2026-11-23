@@ -213,3 +213,50 @@ def test_startup_checks_backend_down(tmp_path):
     p.write_text('[backend]\nbase_url = "http://127.0.0.1:9/v1"\n[models.main]\nname = "x"\n', encoding="utf-8")
     warns = startup_checks(load_config(p))
     assert any("届きません" in w for w in warns)
+
+
+# ── llh autostart(Unsloth の起動を見て、窓口とサービスを自動で起動する) ──
+def _autostart_cfg(tmp_path, lock_port):
+    p = tmp_path / "config.toml"
+    p.write_text(
+        f'[backend]\nbase_url = "http://127.0.0.1:1/v1"\n[models.main]\nname = "m"\n[autostart]\nlock_port = {lock_port}\n',
+        encoding="utf-8",
+    )
+    return p
+
+
+def test_autostart_install_and_uninstall_write_only_the_startup_file(tmp_path, capsys):
+    cfg = _autostart_cfg(tmp_path, 0)
+    startup = tmp_path / "Startup"
+    assert main(["--config", str(cfg), "autostart", "install", "--startup-dir", str(startup)]) == 0
+    files = list(startup.iterdir())
+    assert [f.name for f in files] == ["llh-autostart.vbs"]
+    assert "--config" in files[0].read_text(encoding="utf-16")
+    assert "uninstall" in capsys.readouterr().out
+    assert main(["autostart", "uninstall", "--startup-dir", str(startup)]) == 0
+    assert list(startup.iterdir()) == []
+    assert main(["autostart", "uninstall", "--startup-dir", str(startup)]) == 0   # 無くても、エラーにしない
+
+
+def test_autostart_second_instance_exits_quietly(tmp_path, capsys):
+    import socket
+
+    from llh.autostart import acquire_lock
+
+    probe = socket.socket()
+    probe.bind(("127.0.0.1", 0))
+    port = probe.getsockname()[1]
+    probe.close()
+    held = acquire_lock(port)
+    try:
+        assert main(["--config", str(_autostart_cfg(tmp_path, port)), "autostart"]) == 0
+    finally:
+        held.close()
+    assert "すでに" in capsys.readouterr().out
+
+
+def test_autostart_reports_a_bad_config(tmp_path, capsys):
+    p = tmp_path / "config.toml"
+    p.write_text('[backend]\nbase_url = "http://192.168.0.5:8888/v1"\n[models.main]\nname = "m"\n', encoding="utf-8")
+    assert main(["--config", str(p), "autostart"]) == 3
+    assert "127.0.0.1" in capsys.readouterr().err

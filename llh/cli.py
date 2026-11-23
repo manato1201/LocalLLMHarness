@@ -33,6 +33,61 @@ def cmd_serve(args) -> int:
     return 0
 
 
+def cmd_autostart(args) -> int:
+    """Unsloth Desktop の起動を見て、窓口と、config.toml に書いたサービスを自動で起動する(常駐)。"""
+    from . import autostart as a
+
+    startup_dir = Path(args.startup_dir) if args.startup_dir else None
+    if args.action == "install":
+        try:
+            path = a.install_startup(startup_dir=startup_dir, config=Path(args.config).resolve() if args.config else None)
+        except RuntimeError as e:
+            _out(f"NG: {e}")
+            return 2
+        _out(f"登録しました: {path}")
+        _out("次回のログオンから、自動で見張りを始めます(いま始めるには: uv run llh autostart)。外すには: uv run llh autostart uninstall")
+        return 0
+    if args.action == "uninstall":
+        try:
+            removed = a.uninstall_startup(startup_dir=startup_dir)
+        except RuntimeError as e:
+            _out(f"NG: {e}")
+            return 2
+        _out("登録を外しました。" if removed else "登録はありませんでした。")
+        return 0
+
+    plan = a.load_plan(args.config)
+    lock = a.acquire_lock(plan.lock_port) if plan.lock_port else None
+    if plan.lock_port and lock is None:
+        _out("すでに llh autostart が起動しています。")
+        return 0
+    log_file = plan.log_dir / "autostart.log"
+
+    def log(msg: str) -> None:
+        line = f"{time.strftime('%Y-%m-%d %H:%M:%S')} {msg}"
+        _out(line)
+        try:
+            log_file.parent.mkdir(parents=True, exist_ok=True)
+            with open(log_file, "a", encoding="utf-8") as f:
+                f.write(line + "\n")
+        except OSError:
+            pass
+
+    sup = a.Supervisor(plan, log=log)
+    log(f"見張りを始めます(Unsloth: {plan.unsloth_host}:{plan.unsloth_port} / 起動するもの: {', '.join(s.name for s in plan.services)} / {plan.poll_s:g} 秒ごと)。Ctrl+C で、起動したものを止めて終わります。")
+    try:
+        while True:
+            sup.tick()
+            time.sleep(plan.poll_s)
+    except KeyboardInterrupt:
+        pass
+    finally:
+        sup.shutdown()
+        if lock is not None:
+            lock.close()
+    return 0
+
+
 def cmd_models(args) -> int:
     cfg = load_config(args.config)
     try:
@@ -472,6 +527,11 @@ def build_parser() -> argparse.ArgumentParser:
     sub = p.add_subparsers(dest="cmd", required=True)
 
     sub.add_parser("serve", help="窓口(OpenAI 互換)を起動する").set_defaults(func=cmd_serve)
+    s = sub.add_parser("autostart", help="Unsloth Desktop の起動を見て、窓口と(config.toml に書いた)他のサービスを自動で起動する")
+    s.add_argument("action", nargs="?", default="run", choices=["run", "install", "uninstall"],
+                   help="run=見張りを始める(既定)/ install=ログオン時に自動で始める(Windows)/ uninstall=登録を外す")
+    s.add_argument("--startup-dir", help=argparse.SUPPRESS)   # テスト用: スタートアップのフォルダの差し替え
+    s.set_defaults(func=cmd_autostart)
     sub.add_parser("models", help="裏側のモデルの id を一覧する").set_defaults(func=cmd_models)
 
     s = sub.add_parser("load", help="ロールのモデルを Unsloth に読み込ませる(読み込み済みなら何もしない)")

@@ -82,6 +82,24 @@ uv run llh draft-cases                                # 評価問題の案を、
 
 `llh` は裏側へ渡しません。`X-LLH-Local-Only: 1` のヘッダーでも「外に出さない」にできます。応答ヘッダー `X-LLH-Route` / `X-LLH-Model` / `X-LLH-Destination` / `X-LLH-Sensitivity` で、実際の行き先が分かります。
 
+## Unsloth を開いたら、窓口と他のサービスを自動で起動する
+
+いまは、Unsloth Desktop を開く → `llh serve` → 他のツール(ChapterLens のエンジンなど)、の手順が別々です。`llh autostart` は、Unsloth の起動を見張って、窓口と、`config.toml` の `[autostart]` に書いたサービスを自動で起動します。設定の例は `config.example.toml` の `[autostart]` にあります。
+
+```powershell
+uv run llh autostart            # 見張りを始める(Ctrl+C で、起動したものを止めて終わる)
+uv run llh autostart install    # ログオン時に、見張りを自動で始める(Windows のスタートアップに、窓を出さない .vbs を置く)
+uv run llh autostart uninstall  # 上の登録を外す
+```
+
+- **見張り方**: Unsloth の API のポート(`backend.base_url`)に `poll_s` 秒ごとにつないでみて、つながったら「起動した」と見なします。Unsloth の設定で API を有効にしておいてください。
+- **起動するもの**: 窓口(必ず最初)と、`[[autostart.service]]` に書いたもの(コマンドは配列。shell は通さない。起動前の `pre` コマンドも書ける)。**すでに待ち受けているポートのものは、起動も停止もしません**(手で起動したものには触らない)。
+- **止めるとき**: Unsloth が見えなくなって 2 回続いたら(読み込み中の一瞬の欠けを無視するため)、**自分で起動したものだけ**を止めます(`stop_with_unsloth = false` で止めない)。落ちたサービスは 3 回まで起動し直します。
+- **モデルの読み込み**: `load_role = "main"` と書くと、起動のあとにそのロールのモデルを読み込みます(既定は読み込みません。VRAM を使うため)。
+- **ログ**: `logs/autostart.log`(見張りの経過)・`logs/autostart-<名前>.log`(各サービスの出力)。
+- **二重起動の防止**: `lock_port`(既定 8897)を握ります。すでに見張りが動いていれば、何もせず終わります。
+- **限界**: 見張りの親プロセスを強制終了すると、起動したサービスは残ります(次の見張りは、それを「手で起動したもの」として触りません。止めるときは、そのポートのプロセスを終了してください)。`install` は Windows 専用です(他の OS は、systemd・launchd などに `llh autostart` を登録してください)。**本物の Unsloth Desktop での通しは、未確認**です(偽の Unsloth のポートと、ダミーのサービスで、起動・停止・後始末を確認しました)。
+
 ## 他のツールとの接続
 
 導入チェックリストの Step 4〜6(`rag_local_bridge.py`・`VLMAutoReplayTool`・`ToolOrchestrationHub`)の手順と、確認の範囲は [docs/INTEGRATION.md](docs/INTEGRATION.md)。`DevelopmentRAGEnvironment` と `ToolOrchestrationHub` には、2026-11-21 に変更を加えました(それぞれのリポジトリでコミットします)。
